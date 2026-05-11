@@ -4,6 +4,9 @@ use std::io::Cursor;
 
 uniffi::setup_scaffolding!();
 
+mod md_render;
+mod pdf_gen;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum DocGenError {
     #[error("Validation error: {0}")]
@@ -91,70 +94,91 @@ pub fn validate_document(json: String) -> Result<(), DocGenError> {
 pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
     let doc: Document = serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
     let mut docx = docx_rs::Docx::new();
-    
+
     for block in doc.blocks {
         match block {
             Block::Heading { level, text } => {
-                let mut p = docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(text));
-                match level {
-                    1 => p = p.style("Heading1"),
-                    2 => p = p.style("Heading2"),
-                    3 => p = p.style("Heading3"),
-                    _ => p = p.style("Heading4"),
-                }
+                let mut p = md_render::paragraph_from_markdown(&text);
+                p = match level {
+                    1 => p.style("Heading1"),
+                    2 => p.style("Heading2"),
+                    3 => p.style("Heading3"),
+                    _ => p.style("Heading4"),
+                };
                 docx = docx.add_paragraph(p);
             }
             Block::Paragraph { text } => {
-                docx = docx.add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(text)));
+                docx = docx.add_paragraph(md_render::paragraph_from_markdown(&text));
             }
             Block::List { ordered, items } => {
                 for (i, item) in items.iter().enumerate() {
-                    let mut p = docx_rs::Paragraph::new()
-                        .add_run(docx_rs::Run::new().add_text(item));
-                    if ordered {
-                        p = p.add_run(docx_rs::Run::new().add_text(format!("{}. ", i + 1)));
+                    let prefix = if ordered {
+                        format!("{}. ", i + 1)
                     } else {
-                        p = p.add_run(docx_rs::Run::new().add_text("- "));
-                    }
-                    docx = docx.add_paragraph(p);
+                        "- ".to_string()
+                    };
+                    let mut spans = vec![md_render::StyledSpan {
+                        text: prefix,
+                        bold: false,
+                        italic: false,
+                        code: false,
+                    }];
+                    spans.extend(md_render::markdown_inline_to_spans(item));
+                    let spans = md_render::merge_adjacent_spans(spans);
+                    docx = docx.add_paragraph(md_render::paragraph_from_spans(&spans));
                 }
             }
             Block::Table { header, rows, .. } => {
                 let mut t = docx_rs::Table::new(vec![]);
-                
-                // Add header
+
                 let mut header_cells = vec![];
                 for h in header {
-                    header_cells.push(docx_rs::TableCell::new().add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(h))));
+                    header_cells.push(
+                        docx_rs::TableCell::new()
+                            .add_paragraph(md_render::paragraph_from_markdown(&h)),
+                    );
                 }
                 t = t.add_row(docx_rs::TableRow::new(header_cells));
-                
-                // Add rows
+
                 for r in rows {
                     let mut cells = vec![];
                     for c in r {
-                        cells.push(docx_rs::TableCell::new().add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(c))));
+                        cells.push(
+                            docx_rs::TableCell::new()
+                                .add_paragraph(md_render::paragraph_from_markdown(&c)),
+                        );
                     }
                     t = t.add_row(docx_rs::TableRow::new(cells));
                 }
                 docx = docx.add_table(t);
             }
             Block::Code { text, .. } => {
-                docx = docx.add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(text)));
+                docx = docx.add_paragraph(
+                    docx_rs::Paragraph::new().add_run(
+                        docx_rs::Run::new()
+                            .add_text(text)
+                            .fonts(docx_rs::RunFonts::new().ascii("Consolas")),
+                    ),
+                );
             }
             Block::Math { latex, .. } => {
                 docx = docx.add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(latex)));
             }
             Block::Image { src, alt } => {
                 let alt_text = alt.unwrap_or_else(|| "Image".to_string());
-                docx = docx.add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(format!("[Image: {} (src: {})]", alt_text, src))));
+                docx = docx.add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(format!(
+                    "[Image: {} (src: {})]",
+                    alt_text, src
+                ))));
             }
             Block::PageBreak => {
-                docx = docx.add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_break(docx_rs::BreakType::Page)));
+                docx = docx.add_paragraph(
+                    docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_break(docx_rs::BreakType::Page)),
+                );
             }
         }
     }
-    
+
     let mut buf = Vec::new();
     docx.build().pack(Cursor::new(&mut buf)).map_err(|e| DocGenError::GenerationError(e.to_string()))?;
     Ok(buf)
@@ -163,57 +187,7 @@ pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
 #[uniffi::export]
 pub fn generate_pdf(json: String) -> Result<Vec<u8>, DocGenError> {
     let doc: Document = serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
-    
-    let (pdf_doc, page1, layer1) = printpdf::PdfDocument::new(&doc.metadata.title, printpdf::Mm(210.0), printpdf::Mm(297.0), "Layer 1");
-    let current_layer = pdf_doc.get_page(page1).get_layer(layer1);
-    
-    let font = pdf_doc.add_builtin_font(printpdf::BuiltinFont::Helvetica).map_err(|e| DocGenError::GenerationError(e.to_string()))?;
-    
-    let mut y = 280.0;
-    current_layer.use_text(&doc.metadata.title, 24.0, printpdf::Mm(20.0), printpdf::Mm(y), &font);
-    y -= 20.0;
-    
-    if let Some(author) = &doc.metadata.author {
-        current_layer.use_text(format!("By {}", author), 12.0, printpdf::Mm(20.0), printpdf::Mm(y), &font);
-        y -= 10.0;
-    }
-    
-    for block in doc.blocks {
-        if y < 20.0 {
-            break;
-        }
-        match block {
-            Block::Heading { text, .. } => {
-                current_layer.use_text(text, 18.0, printpdf::Mm(20.0), printpdf::Mm(y), &font);
-                y -= 15.0;
-            }
-            Block::Paragraph { text } => {
-                current_layer.use_text(text, 12.0, printpdf::Mm(20.0), printpdf::Mm(y), &font);
-                y -= 10.0;
-            }
-            Block::List { items, .. } => {
-                for item in items {
-                    current_layer.use_text(format!("• {}", item), 12.0, printpdf::Mm(25.0), printpdf::Mm(y), &font);
-                    y -= 8.0;
-                }
-            }
-            Block::Table { header, rows, .. } => {
-                let header_str = header.join(" | ");
-                current_layer.use_text(header_str, 12.0, printpdf::Mm(20.0), printpdf::Mm(y), &font);
-                y -= 10.0;
-                for row in rows {
-                    let row_str = row.join(" | ");
-                    current_layer.use_text(row_str, 10.0, printpdf::Mm(20.0), printpdf::Mm(y), &font);
-                    y -= 8.0;
-                }
-            }
-            _ => {
-            }
-        }
-    }
-    
-    let buf = pdf_doc.save_to_bytes().map_err(|e| DocGenError::GenerationError(e.to_string()))?;
-    Ok(buf)
+    pdf_gen::generate_pdf_from_document(&doc)
 }
 
 #[uniffi::export]
@@ -264,6 +238,7 @@ pub fn extract_text(bytes: Vec<u8>, mime_type: String) -> Result<String, DocGenE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     fn get_sample_json() -> String {
         r#"{
@@ -349,6 +324,46 @@ mod tests {
         assert!(!bytes.is_empty());
         // PDF files start with %PDF
         assert_eq!(&bytes[0..4], b"%PDF");
+    }
+
+    #[test]
+    fn test_generate_docx_markdown_bold_in_document_xml() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "paragraph", "text": "Hello **world**" }
+            ]
+        }"#
+        .to_string();
+        let bytes = generate_docx(json).expect("docx");
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut f = archive.by_name("word/document.xml").expect("document.xml");
+        let mut xml = String::new();
+        f.read_to_string(&mut xml).expect("read xml");
+        assert!(
+            xml.contains("<w:b") || xml.contains("w:b/>"),
+            "expected bold run in document.xml: {}",
+            &xml[..xml.len().min(2000)]
+        );
+        assert!(!xml.contains("**"), "markdown markers should not appear as literal text");
+    }
+
+    #[test]
+    fn test_generate_pdf_extract_has_no_markdown_asterisks() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "paragraph", "text": "Say **Hi**" }
+            ]
+        }"#
+        .to_string();
+        let pdf = generate_pdf(json).expect("pdf");
+        let text = extract_text(pdf, "application/pdf".to_string()).expect("extract");
+        assert!(!text.contains("**"), "text was: {}", text);
+        assert!(text.contains("Hi") || text.contains("hi"), "text was: {}", text);
     }
 
     #[test]
