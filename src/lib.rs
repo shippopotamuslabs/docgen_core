@@ -265,25 +265,100 @@ pub fn extract_text(bytes: Vec<u8>, mime_type: String) -> Result<String, DocGenE
 mod tests {
     use super::*;
 
+    fn get_sample_json() -> String {
+        r#"{
+            "version": "1.0",
+            "metadata": { "title": "Test Doc", "author": "Sean" },
+            "blocks": [
+                { "type": "heading", "level": 1, "text": "Project Phoenix" },
+                { "type": "paragraph", "text": "This is a test paragraph." },
+                { "type": "list", "ordered": true, "items": ["Item 1", "Item 2"] },
+                { "type": "table", "header": ["H1", "H2"], "rows": [["R1C1", "R1C2"], ["R2C1", "R2C2"]] },
+                { "type": "code", "language": "rust", "text": "fn main() {}" },
+                { "type": "page_break" }
+            ]
+        }"#.to_string()
+    }
+
     #[test]
     fn test_get_schema() {
         let schema = get_schema();
         assert!(schema.contains("\"$schema\""));
         assert!(schema.contains("\"Document\""));
+        assert!(schema.contains("\"heading\""));
+        assert!(schema.contains("\"paragraph\""));
     }
 
     #[test]
-    fn test_validate_document() {
-        let valid_json = r#"{
+    fn test_validate_document_success() {
+        let valid_json = get_sample_json();
+        assert!(validate_document(valid_json).is_ok());
+    }
+
+    #[test]
+    fn test_validate_document_failure_invalid_type() {
+        let invalid_json = r#"{
             "version": "1.0",
             "metadata": { "title": "Test Doc" },
             "blocks": [
-                { "type": "paragraph", "text": "Hello world" }
+                { "type": "invalid_type", "text": "oops" }
             ]
         }"#.to_string();
-        assert!(validate_document(valid_json).is_ok());
+        let result = validate_document(invalid_json);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DocGenError::ValidationError(msg) => assert!(msg.contains("invalid_type")),
+            _ => panic!("Expected ValidationError"),
+        }
+    }
 
-        let invalid_json = r#"{ "invalid": "json" }"#.to_string();
-        assert!(validate_document(invalid_json).is_err());
+    #[test]
+    fn test_validate_document_failure_missing_fields() {
+        let invalid_json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "Test Doc" },
+            "blocks": [
+                { "type": "heading", "text": "missing level" }
+            ]
+        }"#.to_string();
+        let result = validate_document(invalid_json);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DocGenError::ValidationError(msg) => assert!(msg.contains("level")),
+            _ => panic!("Expected ValidationError"),
+        }
+    }
+
+    #[test]
+    fn test_generate_docx() {
+        let json = get_sample_json();
+        let result = generate_docx(json);
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert!(!bytes.is_empty());
+        // DOCX files are zip files, should start with PK
+        assert_eq!(&bytes[0..2], b"PK");
+    }
+
+    #[test]
+    fn test_generate_pdf() {
+        let json = get_sample_json();
+        let result = generate_pdf(json);
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert!(!bytes.is_empty());
+        // PDF files start with %PDF
+        assert_eq!(&bytes[0..4], b"%PDF");
+    }
+
+    #[test]
+    fn test_extract_text_unsupported() {
+        let bytes = vec![1, 2, 3];
+        let result = extract_text(bytes, "image/png".to_string());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DocGenError::UnsupportedMimeType(mime) => assert_eq!(mime, "image/png"),
+            _ => panic!("Expected UnsupportedMimeType"),
+        }
     }
 }
