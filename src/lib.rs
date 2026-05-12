@@ -1,4 +1,3 @@
-use docx_rs::{Docx, LineSpacing, LineSpacingType, PageMargin, RunFonts};
 use serde::{Deserialize, Serialize};
 use schemars::{schema_for, JsonSchema};
 use std::io::Cursor;
@@ -7,6 +6,9 @@ uniffi::setup_scaffolding!();
 
 mod md_render;
 mod pdf_gen;
+mod pdf_metrics;
+mod highlight;
+mod docx_impl;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum DocGenError {
@@ -38,27 +40,149 @@ pub struct Metadata {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
-    Heading { level: u32, text: String },
-    Paragraph { text: String },
-    List { ordered: bool, items: Vec<String> },
+    Heading {
+        level: u32,
+        text: String,
+        #[serde(default)]
+        anchor: Option<String>,
+    },
+    Paragraph {
+        text: String,
+        #[serde(default)]
+        align: Option<Alignment>,
+    },
+    List {
+        ordered: bool,
+        items: Vec<ListItem>,
+        #[serde(default)]
+        start: Option<u32>,
+    },
     Table {
         header: Vec<String>,
         rows: Vec<Vec<String>>,
         #[serde(default)]
         alignments: Option<Vec<Alignment>>,
+        #[serde(default)]
+        caption: Option<String>,
     },
-    Code { language: Option<String>, text: String },
+    Code {
+        #[serde(default)]
+        language: Option<String>,
+        text: String,
+        #[serde(default)]
+        show_line_numbers: bool,
+        #[serde(default)]
+        caption: Option<String>,
+        #[serde(default)]
+        highlight_lines: Vec<u32>,
+    },
     Math { display: bool, latex: String },
-    Image { src: String, alt: Option<String> },
+    Image {
+        src: String,
+        #[serde(default)]
+        alt: Option<String>,
+        #[serde(default)]
+        data_base64: Option<String>,
+        #[serde(default)]
+        mime: Option<String>,
+        #[serde(default)]
+        width_pt: Option<f32>,
+        #[serde(default)]
+        height_pt: Option<f32>,
+        #[serde(default)]
+        align: Option<Alignment>,
+    },
     PageBreak,
+    Blockquote {
+        text: String,
+        #[serde(default)]
+        attribution: Option<String>,
+    },
+    HorizontalRule,
+    Callout {
+        kind: CalloutKind,
+        #[serde(default)]
+        title: Option<String>,
+        text: String,
+    },
+    Footnote { id: String, text: String },
+    Toc {
+        #[serde(default)]
+        max_depth: Option<u32>,
+    },
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+pub struct ListItem {
+    pub text: String,
+    #[serde(default)]
+    pub checked: Option<bool>,
+    #[serde(default)]
+    pub children: Vec<ListItem>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CalloutKind {
+    Note,
+    Info,
+    Tip,
+    Warning,
+    Danger,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Alignment {
     Left,
     Center,
     Right,
+}
+
+/// LLM tool arguments for `start_artifact` (camelCase JSON, unknown fields rejected).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartArtifactParams {
+    pub title: String,
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+/// LLM tool arguments for `append_blocks` (camelCase JSON, unknown fields rejected).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppendBlocksParams {
+    pub artifact_id: String,
+    pub blocks: Vec<Block>,
+    pub is_complete: bool,
+}
+
+#[uniffi::export]
+pub fn get_start_artifact_schema() -> String {
+    let schema = schema_for!(StartArtifactParams);
+    serde_json::to_string_pretty(&schema).unwrap()
+}
+
+#[uniffi::export]
+pub fn get_append_blocks_schema() -> String {
+    let schema = schema_for!(AppendBlocksParams);
+    serde_json::to_string_pretty(&schema).unwrap()
+}
+
+#[uniffi::export]
+pub fn validate_start_artifact_params(json: String) -> Result<(), DocGenError> {
+    serde_json::from_str::<StartArtifactParams>(&json).map_err(|e| {
+        DocGenError::ValidationError(format!("start_artifact arguments: {e}"))
+    })?;
+    Ok(())
+}
+
+#[uniffi::export]
+pub fn validate_append_blocks_params(json: String) -> Result<(), DocGenError> {
+    serde_json::from_str::<AppendBlocksParams>(&json).map_err(|e| {
+        DocGenError::ValidationError(format!("append_blocks arguments: {e}"))
+    })?;
+    Ok(())
 }
 
 #[uniffi::export]
@@ -91,193 +215,10 @@ pub fn validate_document(json: String) -> Result<(), DocGenError> {
     Ok(())
 }
 
-fn docx_body_fonts() -> RunFonts {
-    RunFonts::new()
-        .ascii("Times New Roman")
-        .hi_ansi("Times New Roman")
-}
-
-fn docx_heading_fonts() -> RunFonts {
-    RunFonts::new()
-        .ascii("Arial")
-        .hi_ansi("Arial")
-}
-
-fn docx_heading_size(level: u32) -> usize {
-    match level {
-        1 => 34, // 17pt
-        2 => 30, // 15pt
-        3 => 27, // 13.5pt
-        _ => 25, // 12.5pt
-    }
-}
-
-fn docx_body_paragraph_spacing() -> LineSpacing {
-    LineSpacing::new()
-        .line_rule(LineSpacingType::Auto)
-        .line(276)
-        .after(200)
-}
-
-fn docx_heading_paragraph_spacing(level: u32) -> LineSpacing {
-    let before = match level {
-        1 => 360,
-        2 => 300,
-        3 => 260,
-        _ => 220,
-    };
-    LineSpacing::new()
-        .line_rule(LineSpacingType::Auto)
-        .before(before)
-        .after(200)
-        .line(276)
-}
-
-fn docx_cell_paragraph(text: &str) -> docx_rs::Paragraph {
-    md_render::paragraph_from_markdown(text)
-        .fonts(docx_body_fonts())
-        .size(24)
-        .line_spacing(
-            LineSpacing::new()
-                .line_rule(LineSpacingType::Auto)
-                .line(276)
-                .after(80),
-        )
-}
-
 #[uniffi::export]
 pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
     let doc: Document = serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
-    let body_fonts = docx_body_fonts();
-    let mut docx = Docx::new()
-        .default_fonts(body_fonts.clone())
-        .default_size(24)
-        .page_margin(PageMargin::new());
-
-    for block in doc.blocks {
-        match block {
-            Block::Heading { level, text } => {
-                let spans = md_render::markdown_inline_to_spans(&text);
-                let mut p = docx_rs::Paragraph::new()
-                    .line_spacing(docx_heading_paragraph_spacing(level));
-                
-                for sp in spans {
-                    let mut r = docx_rs::Run::new().add_text(sp.text.clone())
-                        .fonts(docx_heading_fonts())
-                        .size(docx_heading_size(level));
-                    if sp.bold { r = r.bold(); }
-                    if sp.italic { r = r.italic(); }
-                    if sp.code { r = r.fonts(docx_rs::RunFonts::new().ascii("Consolas")); }
-                    p = p.add_run(r);
-                }
-                
-                p = match level {
-                    1 => p.style("Heading1"),
-                    2 => p.style("Heading2"),
-                    3 => p.style("Heading3"),
-                    _ => p.style("Heading4"),
-                };
-                docx = docx.add_paragraph(p);
-            }
-            Block::Paragraph { text } => {
-                docx = docx.add_paragraph(
-                    md_render::paragraph_from_markdown(&text)
-                        .fonts(body_fonts.clone())
-                        .size(24)
-                        .line_spacing(docx_body_paragraph_spacing()),
-                );
-            }
-            Block::List { ordered, items } => {
-                for (i, item) in items.iter().enumerate() {
-                    let prefix = if ordered {
-                        format!("{}. ", i + 1)
-                    } else {
-                        "- ".to_string()
-                    };
-                    let mut spans = vec![md_render::StyledSpan {
-                        text: prefix,
-                        bold: false,
-                        italic: false,
-                        code: false,
-                    }];
-                    spans.extend(md_render::markdown_inline_to_spans(item));
-                    let spans = md_render::merge_adjacent_spans(spans);
-                    docx = docx.add_paragraph(
-                        md_render::paragraph_from_spans(&spans)
-                            .fonts(body_fonts.clone())
-                            .size(24)
-                            .line_spacing(docx_body_paragraph_spacing()),
-                    );
-                }
-            }
-            Block::Table { header, rows, .. } => {
-                let mut t = docx_rs::Table::new(vec![]);
-
-                let mut header_cells = vec![];
-                for h in header {
-                    header_cells.push(docx_rs::TableCell::new().add_paragraph(docx_cell_paragraph(&h)));
-                }
-                t = t.add_row(docx_rs::TableRow::new(header_cells));
-
-                for r in rows {
-                    let mut cells = vec![];
-                    for c in r {
-                        cells.push(docx_rs::TableCell::new().add_paragraph(docx_cell_paragraph(&c)));
-                    }
-                    t = t.add_row(docx_rs::TableRow::new(cells));
-                }
-                docx = docx.add_table(t);
-            }
-            Block::Code { text, .. } => {
-                docx = docx.add_paragraph(
-                    docx_rs::Paragraph::new()
-                        .line_spacing(
-                            LineSpacing::new()
-                                .line_rule(LineSpacingType::Auto)
-                                .line(260)
-                                .after(160),
-                        )
-                        .add_run(
-                            docx_rs::Run::new()
-                                .add_text(text)
-                                .fonts(docx_rs::RunFonts::new().ascii("Consolas").hi_ansi("Consolas"))
-                                .size(22),
-                        ),
-                );
-            }
-            Block::Math { latex, .. } => {
-                docx = docx.add_paragraph(
-                    docx_rs::Paragraph::new()
-                        .fonts(body_fonts.clone())
-                        .size(24)
-                        .line_spacing(docx_body_paragraph_spacing())
-                        .add_run(docx_rs::Run::new().add_text(latex)),
-                );
-            }
-            Block::Image { src, alt } => {
-                let alt_text = alt.unwrap_or_else(|| "Image".to_string());
-                docx = docx.add_paragraph(
-                    docx_rs::Paragraph::new()
-                        .fonts(body_fonts.clone())
-                        .size(24)
-                        .line_spacing(docx_body_paragraph_spacing())
-                        .add_run(docx_rs::Run::new().add_text(format!(
-                            "[Image: {} (src: {})]",
-                            alt_text, src
-                        ))),
-                );
-            }
-            Block::PageBreak => {
-                docx = docx.add_paragraph(
-                    docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_break(docx_rs::BreakType::Page)),
-                );
-            }
-        }
-    }
-
-    let mut buf = Vec::new();
-    docx.build().pack(Cursor::new(&mut buf)).map_err(|e| DocGenError::GenerationError(e.to_string()))?;
-    Ok(buf)
+    docx_impl::build_docx_bytes(&doc)
 }
 
 #[uniffi::export]
@@ -343,7 +284,7 @@ mod tests {
             "blocks": [
                 { "type": "heading", "level": 1, "text": "Project Phoenix" },
                 { "type": "paragraph", "text": "This is a test paragraph." },
-                { "type": "list", "ordered": true, "items": ["Item 1", "Item 2"] },
+                { "type": "list", "ordered": true, "items": [{"text": "Item 1", "checked": null, "children": []}, {"text": "Item 2", "checked": null, "children": []}] },
                 { "type": "table", "header": ["H1", "H2"], "rows": [["R1C1", "R1C2"], ["R2C1", "R2C2"]] },
                 { "type": "code", "language": "rust", "text": "fn main() {}" },
                 { "type": "page_break" }
@@ -361,6 +302,7 @@ mod tests {
                      Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris. ",
                     i
                 ),
+                align: None,
             });
         }
         let doc = Document {
@@ -388,6 +330,48 @@ mod tests {
         assert!(schema.contains("\"Document\""));
         assert!(schema.contains("\"heading\""));
         assert!(schema.contains("\"paragraph\""));
+    }
+
+    #[test]
+    fn test_start_artifact_schema_has_title_and_optional_author() {
+        let s = get_start_artifact_schema();
+        assert!(s.contains("\"title\""));
+        assert!(s.contains("\"author\""));
+        assert!(s.contains("\"required\""));
+        assert!(s.contains("\"title\"") && s.contains("StartArtifactParams"));
+    }
+
+    #[test]
+    fn test_append_blocks_schema_has_artifact_id_blocks_is_complete() {
+        let s = get_append_blocks_schema();
+        assert!(s.contains("\"artifactId\"") || s.contains("\"artifact_id\""));
+        assert!(s.contains("\"blocks\""));
+        assert!(s.contains("\"isComplete\"") || s.contains("\"is_complete\""));
+        assert!(s.contains("heading") || s.contains("Heading"));
+    }
+
+    #[test]
+    fn test_validate_start_artifact_params_ok() {
+        assert!(validate_start_artifact_params(r#"{"title":"T"}"#.to_string()).is_ok());
+        assert!(validate_start_artifact_params(r#"{"title":"T","author":"A"}"#.to_string()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_start_artifact_params_rejects_document_shape() {
+        let bad = r#"{"version":"1.0","metadata":{"title":"x"},"blocks":[]}"#.to_string();
+        assert!(validate_start_artifact_params(bad).is_err());
+    }
+
+    #[test]
+    fn test_validate_append_blocks_params_ok() {
+        let ok = r#"{"artifactId":"id-1","blocks":[{"type":"paragraph","text":"hi"}],"isComplete":false}"#.to_string();
+        assert!(validate_append_blocks_params(ok).is_ok());
+    }
+
+    #[test]
+    fn test_validate_append_blocks_params_rejects_document_shape() {
+        let bad = r#"{"version":"1.0","metadata":{"title":"x"},"blocks":[]}"#.to_string();
+        assert!(validate_append_blocks_params(bad).is_err());
     }
 
     #[test]
