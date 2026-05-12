@@ -1,6 +1,6 @@
 //! DOCX generation (docx-rs).
 
-use crate::highlight::{hex_for_kind, prepare_code_text, tokenize};
+use crate::highlight::{hex_for_kind_code_dark, prepare_code_text, tokenize, TokenKind};
 use crate::md_render;
 use crate::{Alignment, Block, CalloutKind, DocGenError, Document, ListItem};
 use docx_rs::{
@@ -203,14 +203,15 @@ fn add_list_recursive(
 fn code_shade() -> Shading {
     Shading::new()
         .shd_type(ShdType::Clear)
-        .fill("F2F2F2")
+        .fill("1E222A")
         .color("auto")
 }
 
 fn code_line_spacing() -> LineSpacing {
     LineSpacing::new()
-        .line_rule(LineSpacingType::Auto)
+        .line_rule(LineSpacingType::Exact)
         .line(240)
+        .before(0)
         .after(0)
 }
 
@@ -221,25 +222,25 @@ fn code_block_table_borders() -> TableBorders {
             TableBorder::new(TableBorderPosition::Top)
                 .border_type(BorderType::Single)
                 .size(4)
-                .color("D8D8D8"),
+                .color("3D4450"),
         )
         .set(
             TableBorder::new(TableBorderPosition::Bottom)
                 .border_type(BorderType::Single)
                 .size(4)
-                .color("D8D8D8"),
+                .color("3D4450"),
         )
         .set(
             TableBorder::new(TableBorderPosition::Left)
                 .border_type(BorderType::Single)
                 .size(18)
-                .color("A0A0A0"),
+                .color("569CD6"),
         )
         .set(
             TableBorder::new(TableBorderPosition::Right)
                 .border_type(BorderType::Single)
                 .size(4)
-                .color("D8D8D8"),
+                .color("3D4450"),
         )
 }
 
@@ -247,13 +248,14 @@ fn code_paragraph_line(prefix: &str, body: &str, language: Option<&str>) -> Para
     let mono = RunFonts::new().ascii("Consolas").hi_ansi("Consolas");
     let ls = code_line_spacing();
     let mut p = Paragraph::new().line_spacing(ls);
+    p.property = p.property.shading(code_shade());
     if !prefix.is_empty() {
         p = p.add_run(
             Run::new()
                 .add_text(prefix.to_string())
                 .fonts(mono.clone())
                 .size(18)
-                .color("666666"),
+                .color("858585"),
         );
     }
     let mut hl = tokenize(language, body);
@@ -263,7 +265,8 @@ fn code_paragraph_line(prefix: &str, body: &str, language: Option<&str>) -> Para
             Run::new()
                 .add_text(preserve_leading_nbsp(body))
                 .fonts(mono.clone())
-                .size(20),
+                .size(20)
+                .color(hex_for_kind_code_dark(TokenKind::Default)),
         );
     }
     let mut last = 0usize;
@@ -281,7 +284,7 @@ fn code_paragraph_line(prefix: &str, body: &str, language: Option<&str>) -> Para
                     .add_text(seg)
                     .fonts(mono.clone())
                     .size(20)
-                    .color("000000"),
+                    .color(hex_for_kind_code_dark(TokenKind::Default)),
             );
         }
         if s < e {
@@ -291,7 +294,7 @@ fn code_paragraph_line(prefix: &str, body: &str, language: Option<&str>) -> Para
                     .add_text(body[s..e].to_string())
                     .fonts(mono.clone())
                     .size(20)
-                    .color(hex_for_kind(kind)),
+                    .color(hex_for_kind_code_dark(kind)),
             );
         }
         last = e.max(last);
@@ -301,7 +304,8 @@ fn code_paragraph_line(prefix: &str, body: &str, language: Option<&str>) -> Para
             Run::new()
                 .add_text(body[last..].to_string())
                 .fonts(mono.clone())
-                .size(20),
+                .size(20)
+                .color(hex_for_kind_code_dark(TokenKind::Default)),
         );
     }
     p
@@ -310,14 +314,17 @@ fn code_paragraph_line(prefix: &str, body: &str, language: Option<&str>) -> Para
 /// Blank code line: keeps row height inside shaded cell (Word collapses empty paragraphs).
 fn code_paragraph_blank() -> Paragraph {
     let mono = RunFonts::new().ascii("Consolas").hi_ansi("Consolas");
-    Paragraph::new()
+    let mut p = Paragraph::new()
         .line_spacing(code_line_spacing())
         .add_run(
             Run::new()
                 .add_text("\u{00A0}".to_string())
                 .fonts(mono)
-                .size(20),
-        )
+                .size(20)
+                .color("D4D4D4"),
+        );
+    p.property = p.property.shading(code_shade());
+    p
 }
 
 fn preserve_leading_nbsp(s: &str) -> String {
@@ -522,6 +529,29 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                 }
                 let prepared = prepare_code_text(language.as_deref(), text);
                 let mut cell = TableCell::new().shading(code_shade());
+                if let Some(lang) = language
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let mut hdr = Paragraph::new()
+                        .line_spacing(
+                            LineSpacing::new()
+                                .line_rule(LineSpacingType::Exact)
+                                .line(200)
+                                .before(0)
+                                .after(0),
+                        )
+                        .add_run(
+                            Run::new()
+                                .add_text(lang.to_ascii_lowercase())
+                                .fonts(RunFonts::new().ascii("Consolas").hi_ansi("Consolas"))
+                                .size(18)
+                                .color("858585"),
+                        );
+                    hdr.property = hdr.property.shading(code_shade());
+                    cell = cell.add_paragraph(hdr);
+                }
                 if prepared.is_empty() {
                     cell = cell.add_paragraph(code_paragraph_blank());
                 } else {

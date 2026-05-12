@@ -16,15 +16,44 @@ pub struct Span {
     pub kind: TokenKind,
 }
 
-/// Pretty-print JSON when `language` is `json` / `JSON`.
-pub fn prepare_code_text(language: Option<&str>, text: &str) -> String {
-    let lang = language.as_deref().unwrap_or("").to_ascii_lowercase();
-    if lang == "json" {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-            return serde_json::to_string_pretty(&v).unwrap_or_else(|_| text.to_string());
+/// Expand tabs so monospace layouts match editors (common source of "flat" code in exports).
+fn expand_tabs(s: &str, tab_cols: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut lines = s.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let mut col = 0usize;
+        for ch in line.chars() {
+            if ch == '\t' {
+                let sp = tab_cols.saturating_sub(col % tab_cols).max(1);
+                for _ in 0..sp {
+                    out.push(' ');
+                }
+                col += sp;
+            } else {
+                out.push(ch);
+                col += 1;
+            }
+        }
+        if lines.peek().is_some() {
+            out.push('\n');
         }
     }
-    text.to_string()
+    out
+}
+
+/// Pretty-print JSON when `language` is `json` / `JSON`; always normalizes tabs for display.
+pub fn prepare_code_text(language: Option<&str>, text: &str) -> String {
+    let lang = language.as_deref().unwrap_or("").to_ascii_lowercase();
+    let base = if lang == "json" {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            serde_json::to_string_pretty(&v).unwrap_or_else(|_| text.to_string())
+        } else {
+            text.to_string()
+        }
+    } else {
+        text.to_string()
+    };
+    expand_tabs(&base, 4)
 }
 
 pub fn tokenize(language: Option<&str>, text: &str) -> Vec<Span> {
@@ -227,6 +256,8 @@ fn tokenize_json(text: &str) -> Vec<Span> {
     out
 }
 
+/// Light-background syntax colors (e.g. HTML preview); PDF/DOCX code blocks use [`rgb_for_kind_code_dark`].
+#[allow(dead_code)]
 pub fn rgb_for_kind(k: TokenKind) -> [f32; 3] {
     match k {
         TokenKind::Default => [0.0, 0.0, 0.0],
@@ -237,6 +268,19 @@ pub fn rgb_for_kind(k: TokenKind) -> [f32; 3] {
     }
 }
 
+/// Syntax colors on dark code blocks (PDF / screen-like).
+pub fn rgb_for_kind_code_dark(k: TokenKind) -> [f32; 3] {
+    match k {
+        TokenKind::Default => [0.83, 0.83, 0.83],
+        TokenKind::Keyword => [0.77, 0.52, 0.75],
+        TokenKind::String => [0.81, 0.58, 0.47],
+        TokenKind::Comment => [0.42, 0.60, 0.33],
+        TokenKind::Number => [0.71, 0.81, 0.66],
+    }
+}
+
+/// Light-background syntax colors; DOCX/PDF code export uses [`hex_for_kind_code_dark`].
+#[allow(dead_code)]
 pub fn hex_for_kind(k: TokenKind) -> &'static str {
     match k {
         TokenKind::Default => "000000",
@@ -244,5 +288,28 @@ pub fn hex_for_kind(k: TokenKind) -> &'static str {
         TokenKind::String => "006400",
         TokenKind::Comment => "737373",
         TokenKind::Number => "8B0000",
+    }
+}
+
+/// Syntax colors for dark code blocks in DOCX (light text on `#1E222A`-style fill).
+pub fn hex_for_kind_code_dark(k: TokenKind) -> &'static str {
+    match k {
+        TokenKind::Default => "D4D4D4",
+        TokenKind::Keyword => "C586C0",
+        TokenKind::String => "CE9178",
+        TokenKind::Comment => "6A9955",
+        TokenKind::Number => "B5CEA8",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_code_text_expands_tabs() {
+        let out = prepare_code_text(Some("python"), "a\tb\n\tc");
+        // 4-column tab stops: after "a" (col 1) → advance to col 4 (three spaces).
+        assert_eq!(out, "a   b\n    c");
     }
 }
