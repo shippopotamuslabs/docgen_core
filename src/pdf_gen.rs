@@ -261,6 +261,7 @@ impl PdfTextCanvas {
         let w = text_width_pt(&label, f, sz);
         let x = PAGE_W - MARGIN_R - w;
         let y = MARGIN_BOTTOM * 0.5;
+        self.ops.push(Operation::new("BT", vec![]));
         self.ops.push(Operation::new(
             "Tm",
             vec![1.into(), 0.into(), 0.into(), 1.into(), x.into(), y.into()],
@@ -271,7 +272,8 @@ impl PdfTextCanvas {
             vec![Object::Name(f.pdf_name().as_bytes().to_vec()), sz.into()],
         ));
         self.ops.push(text_op(&label));
-        self.begin_text();
+        self.ops.push(Operation::new("ET", vec![]));
+        self.in_text = false;
     }
 
     fn flush_page(&mut self) {
@@ -368,22 +370,23 @@ impl PdfTextCanvas {
     /// Dark code block band + left accent (call after `ensure_vertical_room`, before text).
     fn paint_code_line_background(&mut self, lh: f32) {
         const BG_OVERLAP: f32 = 0.35;
-        let mut h = lh + BG_OVERLAP;
+        let h = lh + BG_OVERLAP;
         let mut y_bl = self.y - lh;
-        // Keep fill inside the body area (avoids streaking into the footer when y drifts).
+        // Keep fill above the footer; do not clamp to the body top margin — a line whose
+        // baseline sits at `PAGE_H - MARGIN_TOP` needs the band to extend slightly above that
+        // y (larger PDF y) for ascenders; clamping `y_bl + h` to `PAGE_H - MARGIN_TOP` shaved the
+        // top of the first code row off the dark background.
         let y_min = MARGIN_BOTTOM;
-        let y_max = PAGE_H - MARGIN_TOP;
         if y_bl < y_min {
             let cut = y_min - y_bl;
             y_bl = y_min;
-            h = (h - cut).max(0.5);
-        }
-        let top = y_bl + h;
-        if top > y_max {
-            h = (y_max - y_bl).max(0.5);
+            let h = (h - cut).max(0.5);
+            let w = usable_width_pt();
+            self.fill_rect_rgb(MARGIN_L, y_bl, w, h, (0.118, 0.133, 0.165));
+            self.fill_rect_rgb(MARGIN_L, y_bl, 3.0, h, (0.22, 0.42, 0.62));
+            return;
         }
         let w = usable_width_pt();
-        // #1e222a-style panel
         self.fill_rect_rgb(MARGIN_L, y_bl, w, h, (0.118, 0.133, 0.165));
         self.fill_rect_rgb(MARGIN_L, y_bl, 3.0, h, (0.22, 0.42, 0.62));
     }
@@ -506,6 +509,9 @@ fn emit_code_block_pdf(
         emit_paragraph_markdown(canvas, c, 10.0, None, MARGIN_L, usable_width_pt());
         canvas.vspace(4.0);
     }
+
+    // Body paragraphs leave an open text object (BT); close it before graphics + code lines.
+    canvas.end_text();
 
     let lines: Vec<&str> = prepared.lines().collect();
     let lh = line_height_for_font(CODE_PT);
