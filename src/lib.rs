@@ -1,3 +1,4 @@
+use docx_rs::{Docx, LineSpacing, LineSpacingType, PageMargin, RunFonts};
 use serde::{Deserialize, Serialize};
 use schemars::{schema_for, JsonSchema};
 use std::io::Cursor;
@@ -90,15 +91,86 @@ pub fn validate_document(json: String) -> Result<(), DocGenError> {
     Ok(())
 }
 
+fn docx_body_fonts() -> RunFonts {
+    RunFonts::new()
+        .ascii("Times New Roman")
+        .hi_ansi("Times New Roman")
+}
+
+fn docx_heading_fonts() -> RunFonts {
+    RunFonts::new()
+        .ascii("Arial")
+        .hi_ansi("Arial")
+}
+
+fn docx_heading_size(level: u32) -> usize {
+    match level {
+        1 => 34, // 17pt
+        2 => 30, // 15pt
+        3 => 27, // 13.5pt
+        _ => 25, // 12.5pt
+    }
+}
+
+fn docx_body_paragraph_spacing() -> LineSpacing {
+    LineSpacing::new()
+        .line_rule(LineSpacingType::Auto)
+        .line(276)
+        .after(200)
+}
+
+fn docx_heading_paragraph_spacing(level: u32) -> LineSpacing {
+    let before = match level {
+        1 => 360,
+        2 => 300,
+        3 => 260,
+        _ => 220,
+    };
+    LineSpacing::new()
+        .line_rule(LineSpacingType::Auto)
+        .before(before)
+        .after(200)
+        .line(276)
+}
+
+fn docx_cell_paragraph(text: &str) -> docx_rs::Paragraph {
+    md_render::paragraph_from_markdown(text)
+        .fonts(docx_body_fonts())
+        .size(24)
+        .line_spacing(
+            LineSpacing::new()
+                .line_rule(LineSpacingType::Auto)
+                .line(276)
+                .after(80),
+        )
+}
+
 #[uniffi::export]
 pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
     let doc: Document = serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
-    let mut docx = docx_rs::Docx::new();
+    let body_fonts = docx_body_fonts();
+    let mut docx = Docx::new()
+        .default_fonts(body_fonts.clone())
+        .default_size(24)
+        .page_margin(PageMargin::new());
 
     for block in doc.blocks {
         match block {
             Block::Heading { level, text } => {
-                let mut p = md_render::paragraph_from_markdown(&text);
+                let spans = md_render::markdown_inline_to_spans(&text);
+                let mut p = docx_rs::Paragraph::new()
+                    .line_spacing(docx_heading_paragraph_spacing(level));
+                
+                for sp in spans {
+                    let mut r = docx_rs::Run::new().add_text(sp.text.clone())
+                        .fonts(docx_heading_fonts())
+                        .size(docx_heading_size(level));
+                    if sp.bold { r = r.bold(); }
+                    if sp.italic { r = r.italic(); }
+                    if sp.code { r = r.fonts(docx_rs::RunFonts::new().ascii("Consolas")); }
+                    p = p.add_run(r);
+                }
+                
                 p = match level {
                     1 => p.style("Heading1"),
                     2 => p.style("Heading2"),
@@ -108,7 +180,12 @@ pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
                 docx = docx.add_paragraph(p);
             }
             Block::Paragraph { text } => {
-                docx = docx.add_paragraph(md_render::paragraph_from_markdown(&text));
+                docx = docx.add_paragraph(
+                    md_render::paragraph_from_markdown(&text)
+                        .fonts(body_fonts.clone())
+                        .size(24)
+                        .line_spacing(docx_body_paragraph_spacing()),
+                );
             }
             Block::List { ordered, items } => {
                 for (i, item) in items.iter().enumerate() {
@@ -125,7 +202,12 @@ pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
                     }];
                     spans.extend(md_render::markdown_inline_to_spans(item));
                     let spans = md_render::merge_adjacent_spans(spans);
-                    docx = docx.add_paragraph(md_render::paragraph_from_spans(&spans));
+                    docx = docx.add_paragraph(
+                        md_render::paragraph_from_spans(&spans)
+                            .fonts(body_fonts.clone())
+                            .size(24)
+                            .line_spacing(docx_body_paragraph_spacing()),
+                    );
                 }
             }
             Block::Table { header, rows, .. } => {
@@ -133,20 +215,14 @@ pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
 
                 let mut header_cells = vec![];
                 for h in header {
-                    header_cells.push(
-                        docx_rs::TableCell::new()
-                            .add_paragraph(md_render::paragraph_from_markdown(&h)),
-                    );
+                    header_cells.push(docx_rs::TableCell::new().add_paragraph(docx_cell_paragraph(&h)));
                 }
                 t = t.add_row(docx_rs::TableRow::new(header_cells));
 
                 for r in rows {
                     let mut cells = vec![];
                     for c in r {
-                        cells.push(
-                            docx_rs::TableCell::new()
-                                .add_paragraph(md_render::paragraph_from_markdown(&c)),
-                        );
+                        cells.push(docx_rs::TableCell::new().add_paragraph(docx_cell_paragraph(&c)));
                     }
                     t = t.add_row(docx_rs::TableRow::new(cells));
                 }
@@ -154,22 +230,42 @@ pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
             }
             Block::Code { text, .. } => {
                 docx = docx.add_paragraph(
-                    docx_rs::Paragraph::new().add_run(
-                        docx_rs::Run::new()
-                            .add_text(text)
-                            .fonts(docx_rs::RunFonts::new().ascii("Consolas")),
-                    ),
+                    docx_rs::Paragraph::new()
+                        .line_spacing(
+                            LineSpacing::new()
+                                .line_rule(LineSpacingType::Auto)
+                                .line(260)
+                                .after(160),
+                        )
+                        .add_run(
+                            docx_rs::Run::new()
+                                .add_text(text)
+                                .fonts(docx_rs::RunFonts::new().ascii("Consolas").hi_ansi("Consolas"))
+                                .size(22),
+                        ),
                 );
             }
             Block::Math { latex, .. } => {
-                docx = docx.add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(latex)));
+                docx = docx.add_paragraph(
+                    docx_rs::Paragraph::new()
+                        .fonts(body_fonts.clone())
+                        .size(24)
+                        .line_spacing(docx_body_paragraph_spacing())
+                        .add_run(docx_rs::Run::new().add_text(latex)),
+                );
             }
             Block::Image { src, alt } => {
                 let alt_text = alt.unwrap_or_else(|| "Image".to_string());
-                docx = docx.add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text(format!(
-                    "[Image: {} (src: {})]",
-                    alt_text, src
-                ))));
+                docx = docx.add_paragraph(
+                    docx_rs::Paragraph::new()
+                        .fonts(body_fonts.clone())
+                        .size(24)
+                        .line_spacing(docx_body_paragraph_spacing())
+                        .add_run(docx_rs::Run::new().add_text(format!(
+                            "[Image: {} (src: {})]",
+                            alt_text, src
+                        ))),
+                );
             }
             Block::PageBreak => {
                 docx = docx.add_paragraph(
@@ -253,6 +349,36 @@ mod tests {
                 { "type": "page_break" }
             ]
         }"#.to_string()
+    }
+
+    #[test]
+    fn test_pdf_paginates_long_content() {
+        let mut blocks = Vec::new();
+        for i in 0..90 {
+            blocks.push(Block::Paragraph {
+                text: format!(
+                    "Paragraph {}. Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+                     Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris. ",
+                    i
+                ),
+            });
+        }
+        let doc = Document {
+            version: "1.0".to_string(),
+            metadata: Metadata {
+                title: "Pagination test".to_string(),
+                author: None,
+            },
+            blocks,
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        let pdf_bytes = generate_pdf(json).unwrap();
+        let lopdf_doc = lopdf::Document::load_mem(&pdf_bytes).unwrap();
+        assert!(
+            lopdf_doc.get_pages().len() >= 2,
+            "expected automatic pagination, got {} page(s)",
+            lopdf_doc.get_pages().len()
+        );
     }
 
     #[test]
@@ -375,5 +501,27 @@ mod tests {
             DocGenError::UnsupportedMimeType(mime) => assert_eq!(mime, "image/png"),
             _ => panic!("Expected UnsupportedMimeType"),
         }
+    }
+
+    #[test]
+    fn test_generate_docx_heading_fonts() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "heading", "level": 1, "text": "H1 Title" }
+            ]
+        }"#.to_string();
+        let bytes = generate_docx(json).expect("docx");
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut f = archive.by_name("word/document.xml").expect("document.xml");
+        let mut xml = String::new();
+        f.read_to_string(&mut xml).expect("read xml");
+        
+        // Check for Arial font in headings
+        assert!(xml.contains("w:ascii=\"Arial\""), "Heading should have Arial font");
+        // Check for font size 34 (17pt * 2)
+        assert!(xml.contains("<w:sz w:val=\"34\""), "Heading 1 should have size 34");
     }
 }

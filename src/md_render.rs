@@ -71,6 +71,49 @@ pub fn markdown_inline_to_spans(input: &str) -> Vec<StyledSpan> {
     merge_adjacent_spans(out)
 }
 
+/// Average glyph width for built-in PDF Times-Roman (Type1), as a fraction of font size.
+/// Slightly below typical mixed-case prose so lines extend closer to the margin without
+/// routine overflow (true margin-fitting would need per-glyph widths from the font file).
+pub const PDF_CHAR_WIDTH_EM: f32 = 0.46;
+
+/// Unicode punctuation and symbols that built-in PDF Type1 fonts cannot represent reliably
+/// in literal strings (viewers often mis-decode UTF-8 as Latin-1, producing “â” for em dash).
+/// Normalizes to ASCII / Latin-1-safe replacements before writing PDF text.
+pub fn normalize_for_pdf_builtin_fonts(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            // Dashes
+            '\u{2014}' | '\u{2015}' | '\u{2012}' => out.push_str("--"), // em / horizontal bar / figure
+            '\u{2013}' | '\u{2212}' => out.push('-'),                   // en / minus
+            // Quotes
+            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{02bc}' => out.push('\''),
+            '\u{201c}' | '\u{201d}' | '\u{201e}' => out.push('"'),
+            '\u{00ab}' | '\u{00bb}' => out.push('"'),
+            // Space / ellipsis
+            '\u{00a0}' | '\u{202f}' | '\u{2007}' => out.push(' '),
+            '\u{2026}' => out.push_str("..."),
+            // Invisible / bidi marks
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' => {}
+            '\u{2022}' => out.push('-'), // bullet → hyphen (safe in all encodings)
+            c if c.is_control() && c != '\t' => out.push(' '),
+            // Other Unicode (e.g. accented letters, Cyrillic): pass through. Built-in Type1 still has
+            // limits, but replacing everything outside Latin-1 was too aggressive for real prose.
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Returns a safe maximum characters per line for proportional wrapping at `font_size_pt`.
+pub fn max_chars_for_pdf_line(font_size_pt: f32, content_width_pt: f32) -> usize {
+    if font_size_pt <= 0.0 || content_width_pt <= 1.0 {
+        return 40;
+    }
+    let n = (content_width_pt / (font_size_pt * PDF_CHAR_WIDTH_EM)).floor() as usize;
+    n.clamp(12, 120)
+}
+
 pub fn merge_adjacent_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
     let mut merged: Vec<StyledSpan> = Vec::new();
     for s in spans {
@@ -200,6 +243,21 @@ mod tests {
         let spans = markdown_inline_to_spans("A *italic* and `code`");
         assert!(spans.iter().any(|s| s.italic && s.text.contains("italic")));
         assert!(spans.iter().any(|s| s.code && s.text.contains("code")));
+    }
+
+    #[test]
+    fn max_chars_scales_with_width() {
+        let narrow = max_chars_for_pdf_line(12.0, 200.0);
+        let wide = max_chars_for_pdf_line(12.0, 400.0);
+        assert!(wide > narrow);
+        assert!(narrow >= 12);
+    }
+
+    #[test]
+    fn pdf_normalizes_em_dash_and_smart_quotes() {
+        let s = "a\u{2014}b\u{2013}c\u{2018}d\u{201c}e";
+        let n = normalize_for_pdf_builtin_fonts(s);
+        assert_eq!(n, "a--b-c'd\"e");
     }
 
     #[test]
