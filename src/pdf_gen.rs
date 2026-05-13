@@ -1,6 +1,6 @@
 //! PDF generation using `lopdf` with measured wrapping (`pdf_metrics`) and built-in Type1 fonts.
 
-use crate::highlight::{prepare_code_text, rgb_for_kind, tokenize};
+use crate::highlight::{prepare_code_text, rgb_for_kind_code_dark, tokenize};
 use crate::md_render::{
     markdown_inline_to_spans, normalize_for_pdf_builtin_fonts, wrap_spans_to_lines_pdf, StyledSpan,
 };
@@ -331,6 +331,24 @@ impl PdfTextCanvas {
         self.ops.push(Operation::new("Q", vec![]));
     }
 
+    fn fill_rect_rgb(&mut self, x: f32, y_bottom: f32, w: f32, h: f32, rgb: (f32, f32, f32)) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        self.end_text();
+        self.ops.push(Operation::new("q", vec![]));
+        self.ops.push(Operation::new(
+            "rg",
+            vec![rgb.0.into(), rgb.1.into(), rgb.2.into()],
+        ));
+        self.ops.push(Operation::new(
+            "re",
+            vec![x.into(), y_bottom.into(), w.into(), h.into()],
+        ));
+        self.ops.push(Operation::new("f", vec![]));
+        self.ops.push(Operation::new("Q", vec![]));
+    }
+
     fn stroke_rect(&mut self, x: f32, y_bottom: f32, w: f32, h: f32, gray: f32, line_w: f32) {
         if w <= 0.0 || h <= 0.0 {
             return;
@@ -347,13 +365,27 @@ impl PdfTextCanvas {
         self.ops.push(Operation::new("Q", vec![]));
     }
 
-    /// Gray band + left accent for one code line (respects page breaks; call after `ensure_vertical_room`).
+    /// Dark code block band + left accent (call after `ensure_vertical_room`, before text).
     fn paint_code_line_background(&mut self, lh: f32) {
         const BG_OVERLAP: f32 = 0.35;
-        let h = lh + BG_OVERLAP;
-        let y_bl = self.y - lh;
-        self.fill_rect_gray(MARGIN_L, y_bl, usable_width_pt(), h, 0.94);
-        self.fill_rect_gray(MARGIN_L, y_bl, 3.0, h, 0.78);
+        let mut h = lh + BG_OVERLAP;
+        let mut y_bl = self.y - lh;
+        // Keep fill inside the body area (avoids streaking into the footer when y drifts).
+        let y_min = MARGIN_BOTTOM;
+        let y_max = PAGE_H - MARGIN_TOP;
+        if y_bl < y_min {
+            let cut = y_min - y_bl;
+            y_bl = y_min;
+            h = (h - cut).max(0.5);
+        }
+        let top = y_bl + h;
+        if top > y_max {
+            h = (y_max - y_bl).max(0.5);
+        }
+        let w = usable_width_pt();
+        // #1e222a-style panel
+        self.fill_rect_rgb(MARGIN_L, y_bl, w, h, (0.118, 0.133, 0.165));
+        self.fill_rect_rgb(MARGIN_L, y_bl, 3.0, h, (0.22, 0.42, 0.62));
     }
 
     fn finish(mut self) -> Vec<Vec<Operation>> {
@@ -466,7 +498,6 @@ fn emit_code_block_pdf(
     caption: Option<&str>,
 ) {
     let prepared = prepare_code_text(language, text);
-    let tokens = tokenize(language, &prepared);
     let mono = PdfFont::Courier;
     let inner_left = MARGIN_L + CODE_PAD + if show_line_numbers { CODE_LINE_NUM_W } else { 0.0 };
     let inner_w = usable_width_pt() - CODE_PAD * 2.0 - if show_line_numbers { CODE_LINE_NUM_W } else { 0.0 };
@@ -480,16 +511,15 @@ fn emit_code_block_pdf(
     let lh = line_height_for_font(CODE_PT);
 
     for (idx, raw_line) in lines.iter().enumerate() {
-        let line_start: usize = prepared
-            .lines()
-            .take(idx)
-            .map(|l| l.len() + 1)
-            .sum();
+        // Tokenize the same string we measure and wrap (WinAnsi-normalized), so indices stay aligned
+        // across soft wraps and page breaks.
+        let line_src = normalize_for_pdf_builtin_fonts(raw_line);
+        let line_tokens = tokenize(language, &line_src);
         let line_no = idx + 1;
-        let wrapped = if raw_line.is_empty() {
+        let wrapped = if line_src.is_empty() {
             vec![String::new()]
         } else {
-            wrap_code_line_pdf(raw_line, mono, CODE_PT, inner_w)
+            wrap_code_line_pdf(&line_src, mono, CODE_PT, inner_w)
         };
         let mut is_first_sub = true;
         let mut col_off = 0usize;
@@ -504,7 +534,7 @@ fn emit_code_block_pdf(
                     text: num,
                     size_pt: CODE_PT,
                     font: mono,
-                    rgb: (0.45, 0.45, 0.45),
+                    rgb: (0.45, 0.52, 0.60),
                     link_uri: None,
                 });
             } else if show_line_numbers {
@@ -512,7 +542,7 @@ fn emit_code_block_pdf(
                     text: "      ".to_string(),
                     size_pt: CODE_PT,
                     font: mono,
-                    rgb: (0.45, 0.45, 0.45),
+                    rgb: (0.45, 0.52, 0.60),
                     link_uri: None,
                 });
             }
@@ -521,18 +551,18 @@ fn emit_code_block_pdf(
                     text: " ".to_string(),
                     size_pt: CODE_PT,
                     font: mono,
-                    rgb: (0.0, 0.0, 0.0),
+                    rgb: (0.83, 0.83, 0.83),
                     link_uri: None,
                 });
             } else {
                 for (ti, ch) in w.char_indices() {
-                    let abs = line_start + col_off + ti;
-                    let kind = tokens
+                    let abs = col_off + ti;
+                    let kind = line_tokens
                         .iter()
                         .find(|sp| abs >= sp.start && abs < sp.end)
                         .map(|sp| sp.kind)
                         .unwrap_or(crate::highlight::TokenKind::Default);
-                    let [r, g, b] = rgb_for_kind(kind);
+                    let [r, g, b] = rgb_for_kind_code_dark(kind);
                     row.push(TextChunk {
                         text: ch.to_string(),
                         size_pt: CODE_PT,
