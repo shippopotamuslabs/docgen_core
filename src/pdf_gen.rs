@@ -24,8 +24,11 @@ const TITLE_PT: f32 = 20.0;
 const CODE_PT: f32 = 9.0;
 const CODE_PAD: f32 = 6.0;
 const CODE_LINE_NUM_W: f32 = 28.0;
-/// Extra fill above the nominal line box (PDF baseline vs some mobile PDF viewers).
-const CODE_BG_TOP_EXTRA_PT: f32 = 5.0;
+/// Extra fill above the nominal line box so the first code line's ascenders (6.81pt for 9pt
+/// Courier) are fully inside the background. Non-first lines are covered by the previous line's
+/// background, so only the first line requires this margin.  Needs to exceed ascender − BG_OVERLAP
+/// (6.81 − 0.35 = 6.46pt), so 8.0 gives ~1.5pt of headroom.
+const CODE_BG_TOP_EXTRA_PT: f32 = 8.0;
 
 fn usable_width_pt() -> f32 {
     (PAGE_W - MARGIN_L - MARGIN_R).max(72.0)
@@ -588,7 +591,9 @@ fn emit_code_block_pdf(
             is_first_sub = false;
         }
     }
-    canvas.vspace(8.0);
+    // 10 pt gap: enough to keep Times-Roman 12 pt ascenders (≈8.2 pt) clear of the
+    // last line's dark background rect, which extends lh_code below the baseline.
+    canvas.vspace(10.0);
 }
 
 fn pad_cell_to_points(s: &str, font: PdfFont, sz: f32, target_pt: f32) -> String {

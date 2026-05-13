@@ -95,6 +95,16 @@ pub fn normalize_for_pdf_builtin_fonts(s: &str) -> String {
             '\u{2026}' => out.push_str("..."),
             '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' => {}
             '\u{2022}' => out.push('-'),
+            // Box Drawing (U+2500–U+257F): map to ASCII so WinAnsi bytes don't corrupt.
+            // UTF-8 first byte 0xE2 otherwise renders as 'â' in every line.
+            '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}' | '\u{2508}' | '\u{2509}'
+            | '\u{254C}' | '\u{254D}' => out.push('-'),
+            '\u{2550}' => out.push_str("="),
+            '\u{2502}' | '\u{2503}' | '\u{250A}' | '\u{250B}' | '\u{254E}' | '\u{254F}'
+            | '\u{2551}' => out.push('|'),
+            '\u{2500}'..='\u{257F}' => out.push('+'), // remaining corners/junctions
+            // Block Elements (U+2580–U+259F)
+            '\u{2580}'..='\u{259F}' => out.push('#'),
             c if c.is_control() && c != '\t' => out.push(' '),
             c => out.push(c),
         }
@@ -387,5 +397,25 @@ mod tests {
     fn link_span_has_url() {
         let spans = markdown_inline_to_spans("[hi](https://example.com)");
         assert!(spans.iter().any(|s| s.hyperlink.as_deref() == Some("https://example.com")));
+    }
+
+    #[test]
+    fn pdf_normalizes_box_drawing_chars_to_ascii() {
+        // Box-drawing chars (U+2500 range) would otherwise emit raw UTF-8 bytes that WinAnsi
+        // renders as 'â' (0xE2, first byte of every 3-byte sequence in this block).
+        let tree = "├── main.rs\n│   └── mod.rs\n└── lib.rs";
+        let n = normalize_for_pdf_builtin_fonts(tree);
+        assert!(!n.contains('â'), "raw UTF-8 leaked into normalized output: {n:?}");
+        // Horizontal line chars → '-'
+        assert_eq!(normalize_for_pdf_builtin_fonts("─"), "-");
+        // Vertical line chars → '|'
+        assert_eq!(normalize_for_pdf_builtin_fonts("│"), "|");
+        // Corner / junction chars → '+'
+        assert_eq!(normalize_for_pdf_builtin_fonts("├"), "+");
+        assert_eq!(normalize_for_pdf_builtin_fonts("└"), "+");
+        // Double horizontal → '='
+        assert_eq!(normalize_for_pdf_builtin_fonts("═"), "=");
+        // Double vertical → '|'
+        assert_eq!(normalize_for_pdf_builtin_fonts("║"), "|");
     }
 }
