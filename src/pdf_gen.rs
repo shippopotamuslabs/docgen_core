@@ -8,7 +8,7 @@ use crate::pdf_metrics::{prefix_width_pt, text_width_pt, PdfFont};
 use crate::{Alignment, Block, CalloutKind, DocGenError, Document, ListItem};
 use base64::Engine;
 use lopdf::content::{Content, Operation};
-use lopdf::{dictionary, Document as LopdfDocument, Object, ObjectId, Stream};
+use lopdf::{dictionary, Document as LopdfDocument, Object, ObjectId, Stream, StringFormat};
 use std::collections::BTreeMap;
 
 const PAGE_W: f32 = 595.0;
@@ -24,22 +24,23 @@ const TITLE_PT: f32 = 20.0;
 const CODE_PT: f32 = 9.0;
 const CODE_PAD: f32 = 6.0;
 const CODE_LINE_NUM_W: f32 = 28.0;
+/// Extra fill above the nominal line box (PDF baseline vs some mobile PDF viewers).
+const CODE_BG_TOP_EXTRA_PT: f32 = 5.0;
 
 fn usable_width_pt() -> f32 {
     (PAGE_W - MARGIN_L - MARGIN_R).max(72.0)
 }
 
-fn escape_pdf_literal(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('(', "\\(")
-        .replace(')', "\\)")
-}
-
 fn text_op(s: &str) -> Operation {
     let normalized = normalize_for_pdf_builtin_fonts(s);
+    // `lopdf` already escapes literal strings; our old `\\(` layer doubled escapes and
+    // showed as visible backslashes. Hex strings avoid `(` / `)` / `\` edge cases in viewers.
     Operation::new(
         "Tj",
-        vec![Object::string_literal(escape_pdf_literal(&normalized))],
+        vec![Object::String(
+            normalized.into_bytes(),
+            StringFormat::Hexadecimal,
+        )],
     )
 }
 
@@ -370,7 +371,7 @@ impl PdfTextCanvas {
     /// Dark code block band + left accent (call after `ensure_vertical_room`, before text).
     fn paint_code_line_background(&mut self, lh: f32) {
         const BG_OVERLAP: f32 = 0.35;
-        let h = lh + BG_OVERLAP;
+        let h = lh + BG_OVERLAP + CODE_BG_TOP_EXTRA_PT;
         let mut y_bl = self.y - lh;
         // Keep fill above the footer; do not clamp to the body top margin — a line whose
         // baseline sits at `PAGE_H - MARGIN_TOP` needs the band to extend slightly above that
