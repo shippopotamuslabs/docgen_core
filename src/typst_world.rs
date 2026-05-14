@@ -44,6 +44,14 @@ impl PocketCrewWorld {
                 fonts.push(font);
             }
         }
+        // Load New Computer Modern Math and other bundled Typst fonts so that
+        // math mode has the fonts it needs to render equations.
+        for bytes in typst_assets::fonts() {
+            let buf = Bytes::new(bytes.to_vec());
+            for font in Font::iter(buf) {
+                fonts.push(font);
+            }
+        }
         let book = FontBook::from_fonts(fonts.iter());
         let main_id = FileId::new(None, VirtualPath::new("/main.typ"));
         let source = Source::new(main_id, source_text);

@@ -22,12 +22,13 @@ thiserror = "2.0"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 flate2 = "1.0"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 typst = "0.14.2"
+typst-assets = { version = "0.14.2", features = ["fonts"] }
 typst-pdf = "0.14.2"
 time = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "uniffi-bindgen"

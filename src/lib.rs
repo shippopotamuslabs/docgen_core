@@ -6,6 +6,7 @@ uniffi::setup_scaffolding!();
 
 mod docx_impl;
 mod highlight;
+mod latex_to_typst;
 mod md_render;
 mod typst_gen;
 mod typst_world;
@@ -500,6 +501,68 @@ mod tests {
             DocGenError::UnsupportedMimeType(mime) => assert_eq!(mime, "image/png"),
             _ => panic!("Expected UnsupportedMimeType"),
         }
+    }
+
+    #[test]
+    fn test_generate_docx_math_block_embeds_word_native_omath_text() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "math", "display": true, "latex": "E = mc^2" }
+            ]
+        }"#
+        .to_string();
+        let bytes = generate_docx(json).expect("docx");
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document.xml")
+            .read_to_string(&mut xml)
+            .expect("read xml");
+        assert!(
+            xml.contains("<m:t") && xml.contains("E = mc^2"),
+            "expected OMML m:t with LaTeX source; fragment: {}",
+            &xml[xml.find("<m:oMath").unwrap_or(0)..(xml.find("<m:oMath").unwrap_or(0) + 500).min(xml.len())]
+        );
+        assert!(
+            !xml.contains("<m:oMath/>"),
+            "unexpected empty self-closing m:oMath; fragment: {}",
+            &xml[xml.find("<m:oMath").unwrap_or(0)..(xml.find("<m:oMath").unwrap_or(0) + 400).min(xml.len())]
+        );
+        assert!(
+            !xml.contains("http://www.w3.org/1998/Math/MathML"),
+            "W3C MathML inside m:oMath is not Word-compatible and must not be emitted"
+        );
+    }
+
+    #[test]
+    fn test_generate_docx_paragraph_inline_dollar_not_literal_delimiters() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "paragraph", "text": "Einstein $E = mc^2$ ties." }
+            ]
+        }"#
+        .to_string();
+        let bytes = generate_docx(json).expect("docx");
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document.xml")
+            .read_to_string(&mut xml)
+            .expect("read xml");
+        assert!(
+            !xml.contains("$E = mc^2$"),
+            "dollar-delimited math should not appear literally; xml snippet: {}",
+            &xml[xml.find("Einstein").unwrap_or(0)..(xml.find("Einstein").unwrap_or(0) + 400).min(xml.len())]
+        );
+        assert!(xml.contains("E = mc^2"));
     }
 
     #[test]

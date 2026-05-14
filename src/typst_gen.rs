@@ -280,19 +280,11 @@ fn emit_block(
             }
         }
         Block::Math { display, latex } => {
-            if is_latex_only(latex) {
-                let escaped = latex.replace('\\', "\\\\").replace('"', "\\\"");
-                out.push_str("// unsupported LaTeX: ");
-                out.push_str(latex);
-                out.push('\n');
-                out.push_str(&format!("#raw(\"{}\")\n\n", escaped));
+            let typst_math = crate::latex_to_typst::latex_to_typst_math(latex);
+            if *display {
+                out.push_str(&format!("$ {typst_math} $\n\n"));
             } else {
-                if *display {
-                    out.push_str(&format!("// $ {} $\n", latex));
-                } else {
-                    out.push_str(&format!("// ${}$\n", latex));
-                }
-                out.push_str(&format!("#raw(\"{}\")\n\n", escape_rust_string(latex)));
+                out.push_str(&format!("${typst_math}$\n\n"));
             }
         }
         Block::Blockquote { text, attribution } => {
@@ -400,24 +392,6 @@ fn emit_list_item(item: &crate::ListItem, ordered: bool, depth: usize, out: &mut
     for child in &item.children {
         emit_list_item(child, ordered, depth + 1, out);
     }
-}
-
-/// Detect LaTeX-only constructs: any backslash followed by an ASCII letter.
-fn is_latex_only(latex: &str) -> bool {
-    let bytes = latex.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            let c = bytes[i + 1];
-            if c.is_ascii_alphabetic() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn escape_rust_string(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Convert a Markdown inline string into Typst inline markup.
@@ -913,7 +887,8 @@ mod tests {
             latex: "E = mc^2".to_string(),
         }]);
         let out = json_to_typst(&doc).source;
-        assert!(out.contains("$ E = mc^2 $"), "got: {}", trim(&out));
+        // Letters spaced so Typst treats them as separate variables; display $ ... $
+        assert!(out.contains("$ E = m c^2 $"), "got: {}", trim(&out));
     }
 
     // ── G21 — Preamble sets Inter font ───────────────────────────────────────
@@ -1011,7 +986,7 @@ mod tests {
             latex: "x^2".to_string(),
         }]);
         let out = json_to_typst(&doc).source;
-        // Inline math: $x^2$ (no surrounding spaces inside the delimiters)
+        // Inline math: $x^2$ (no surrounding spaces)
         assert!(out.contains("$x^2$"), "got: {}", trim(&out));
     }
 
@@ -1227,30 +1202,25 @@ mod tests {
         );
     }
 
-    // ── G39 — LaTeX fallback for unsupported commands ─────────────────────────
+    // ── G39 — LaTeX math translated to Typst math syntax ─────────────────────
 
     #[test]
-    fn unsupported_latex_emits_comment_and_raw_fallback() {
+    fn latex_frac_translates_to_typst_frac() {
         let doc = doc_with_blocks(vec![Block::Math {
             display: true,
             latex: r"\frac{1}{2}".to_string(),
         }]);
         let out = json_to_typst(&doc).source;
-        // Must NOT emit `$ \frac{1}{2} $` (would be a Typst compile error).
+        // Must NOT pass raw LaTeX backslash commands to Typst
         assert!(
-            !out.contains(r"$ \frac{1}{2} $"),
-            "must not pass LaTeX to Typst math: {}",
+            !out.contains(r"\frac"),
+            "raw \\frac must not appear in output: {}",
             trim(&out)
         );
-        // Must emit a comment marker AND a #raw fallback.
+        // Must emit Typst frac() call wrapped in display math delimiters
         assert!(
-            out.contains("// unsupported LaTeX"),
-            "missing comment marker: {}",
-            trim(&out)
-        );
-        assert!(
-            out.contains("#raw("),
-            "missing raw fallback: {}",
+            out.contains("$ frac(1, 2) $"),
+            "expected Typst frac: {}",
             trim(&out)
         );
     }
