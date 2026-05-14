@@ -1,6 +1,7 @@
 //! DOCX generation (docx-rs).
 
 use crate::highlight::{hex_for_kind_code_dark, prepare_code_text, tokenize, TokenKind};
+use crate::math_png;
 use crate::md_render;
 use crate::{Alignment, Block, CalloutKind, DocGenError, Document, ListItem};
 use docx_rs::{
@@ -64,6 +65,25 @@ fn cell_paragraph(text: &str) -> Paragraph {
         )
 }
 
+fn math_caption_paragraph(latex: &str, include_failure_marker: bool) -> Paragraph {
+    let text = if include_failure_marker {
+        format!("[Equation render failed] LaTeX source: {latex}")
+    } else {
+        format!("LaTeX source: {latex}")
+    };
+    Paragraph::new()
+        .fonts(body_fonts())
+        .size(20)
+        .line_spacing(body_spacing())
+        .add_run(
+            Run::new()
+                .add_text(text)
+                .fonts(RunFonts::new().ascii("Consolas").hi_ansi("Consolas"))
+                .size(20)
+                .color("808080"),
+        )
+}
+
 /// Inline `$...$` is not parsed as math by the Markdown → DOCX path. Rewrite to
 /// Markdown code spans so LaTeX is visible (Consolas) instead of literal dollar
 /// delimiters.
@@ -93,8 +113,8 @@ fn docx_markdown_with_visible_inline_math(input: &str) -> String {
             if nc == '\\' {
                 buf.push('\\');
                 if let Some(&p) = chars.peek() {
-                    buf.push(p);
                     if p == '$' || p == '\\' {
+                        buf.push(p);
                         chars.next();
                     }
                 }
@@ -242,13 +262,12 @@ fn add_list_recursive(
 ) -> Docx {
     let num_id = if ordered { 1usize } else { 2usize };
     for item in items {
-        let mut p = md_render::paragraph_from_markdown(&docx_markdown_with_visible_inline_math(
-            &item.text,
-        ))
-            .fonts(body.clone())
-            .size(24)
-            .line_spacing(body_spacing())
-            .numbering(NumberingId::new(num_id), IndentLevel::new(level));
+        let mut p =
+            md_render::paragraph_from_markdown(&docx_markdown_with_visible_inline_math(&item.text))
+                .fonts(body.clone())
+                .size(24)
+                .line_spacing(body_spacing())
+                .numbering(NumberingId::new(num_id), IndentLevel::new(level));
         if let Some(true) = item.checked {
             p = p.add_run(Run::new().add_text(" [x] ").bold());
         } else if let Some(false) = item.checked {
@@ -376,15 +395,13 @@ fn code_paragraph_line(prefix: &str, body: &str, language: Option<&str>) -> Para
 /// Blank code line: keeps row height inside shaded cell (Word collapses empty paragraphs).
 fn code_paragraph_blank() -> Paragraph {
     let mono = RunFonts::new().ascii("Consolas").hi_ansi("Consolas");
-    let mut p = Paragraph::new()
-        .line_spacing(code_line_spacing())
-        .add_run(
-            Run::new()
-                .add_text("\u{00A0}".to_string())
-                .fonts(mono)
-                .size(20)
-                .color("D4D4D4"),
-        );
+    let mut p = Paragraph::new().line_spacing(code_line_spacing()).add_run(
+        Run::new()
+            .add_text("\u{00A0}".to_string())
+            .fonts(mono)
+            .size(20)
+            .color("D4D4D4"),
+    );
     p.property = p.property.shading(code_shade());
     p
 }
@@ -396,7 +413,13 @@ fn preserve_leading_nbsp(s: &str) -> String {
     let lead: String = t
         .chars()
         .take(n)
-        .map(|c| if c == '\t' { "    ".to_string() } else { "\u{00A0}".to_string() })
+        .map(|c| {
+            if c == '\t' {
+                "    ".to_string()
+            } else {
+                "\u{00A0}".to_string()
+            }
+        })
         .collect();
     format!("{lead}{rest}")
 }
@@ -433,8 +456,7 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
         .right(1440);
 
     let header = Header::new().add_paragraph(
-        Paragraph::new()
-            .add_run(Run::new().add_text(doc.metadata.title.clone()).size(20)),
+        Paragraph::new().add_run(Run::new().add_text(doc.metadata.title.clone()).size(20)),
     );
     let footer = Footer::new().add_paragraph(
         Paragraph::new()
@@ -457,9 +479,7 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
         .add_numbering(Numbering::new(2, 1));
 
     let mut endnotes: Vec<(String, String)> = Vec::new();
-    let mut math_blocks: Vec<(String, String, bool)> = Vec::new(); // (placeholder, latex, display)
-    let mut math_count: usize = 0;
-
+    let mut math_image_count: usize = 1;
     for block in doc.blocks.iter() {
         match block {
             Block::Heading {
@@ -489,7 +509,8 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                     }
                     if let Some(url) = &sp.hyperlink {
                         let run = r.color("0563C1").underline("single");
-                        let link = docx_rs::Hyperlink::new(url, docx_rs::HyperlinkType::External).add_run(run);
+                        let link = docx_rs::Hyperlink::new(url, docx_rs::HyperlinkType::External)
+                            .add_run(run);
                         p = p.add_hyperlink(link);
                     } else {
                         p = p.add_run(r);
@@ -511,9 +532,9 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                 let mut p = md_render::paragraph_from_markdown(
                     &docx_markdown_with_visible_inline_math(text),
                 )
-                    .fonts(body.clone())
-                    .size(24)
-                    .line_spacing(body_spacing());
+                .fonts(body.clone())
+                .size(24)
+                .line_spacing(body_spacing());
                 if let Some(at) = align_type(align.as_ref().copied()) {
                     p = p.align(at);
                 }
@@ -545,16 +566,11 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                 let mut header_cells = vec![];
                 for (i, h) in header.iter().enumerate() {
                     let mut cp = cell_paragraph(h);
-                    if let Some(a) =
-                        align_type(alignments.as_ref().and_then(|v| v.get(i).copied()))
+                    if let Some(a) = align_type(alignments.as_ref().and_then(|v| v.get(i).copied()))
                     {
                         cp = cp.align(a);
                     }
-                    header_cells.push(
-                        TableCell::new()
-                            .shading(header_shading())
-                            .add_paragraph(cp),
-                    );
+                    header_cells.push(TableCell::new().shading(header_shading()).add_paragraph(cp));
                 }
                 t = t.add_row(TableRow::new(header_cells));
                 for (ri, r) in rows.iter().enumerate() {
@@ -595,11 +611,7 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                 }
                 let prepared = prepare_code_text(language.as_deref(), text);
                 let mut cell = TableCell::new().shading(code_shade());
-                if let Some(lang) = language
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
+                if let Some(lang) = language.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                     let mut hdr = Paragraph::new()
                         .line_spacing(
                             LineSpacing::new()
@@ -642,20 +654,43 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                 docx = docx.add_table(code_table);
             }
             Block::Math { latex, display } => {
-                let placeholder = format!("MATHBLOCK_{math_count}");
-                math_blocks.push((placeholder.clone(), latex.clone(), *display));
-                math_count += 1;
-                let mono = RunFonts::new().ascii("Consolas").hi_ansi("Consolas");
-                docx = docx.add_paragraph(
-                    Paragraph::new()
-                        .line_spacing(body_spacing())
-                        .add_run(
-                            Run::new()
-                                .add_text(placeholder)
-                                .fonts(mono)
-                                .size(20),
-                        ),
-                );
+                let rendered = if latex.trim().is_empty() {
+                    Err(DocGenError::GenerationError(
+                        "math latex is empty".to_string(),
+                    ))
+                } else {
+                    math_png::render_math_latex_to_png(latex, *display)
+                };
+                let mut failed = true;
+                if let Ok(png_bytes) = rendered {
+                    if let Ok(img) = image::load_from_memory(&png_bytes) {
+                        let (wpx, hpx) = image::GenericImageView::dimensions(&img);
+                        let mut pic = Pic::new_with_dimensions(png_bytes, wpx, hpx)
+                            .id(format!("image{math_image_count}"));
+                        math_image_count += 1;
+                        if !display {
+                            // 24pt body line height at 96 DPI: 24 * 96 / 72 = 32px.
+                            let target_height_px = 24.0_f32 * 96.0 / 72.0;
+                            let aspect = wpx as f32 / hpx.max(1) as f32;
+                            let target_width_px = (target_height_px * aspect).round().max(1.0);
+                            pic.size = (
+                                docx_rs::from_px(target_width_px as u32),
+                                docx_rs::from_px(target_height_px as u32),
+                            );
+                        }
+                        let mut p = Paragraph::new()
+                            .fonts(body.clone())
+                            .size(24)
+                            .line_spacing(body_spacing())
+                            .add_run(Run::new().add_image(pic));
+                        if *display {
+                            p = p.align(AlignmentType::Center);
+                        }
+                        docx = docx.add_paragraph(p);
+                        failed = false;
+                    }
+                }
+                docx = docx.add_paragraph(math_caption_paragraph(latex, failed));
             }
             Block::Image {
                 src,
@@ -667,10 +702,9 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                 align,
             } => {
                 if let (Some(b64), Some(_m)) = (data_base64, mime) {
-                    if let Ok(bytes) = base64::Engine::decode(
-                        &base64::engine::general_purpose::STANDARD,
-                        b64,
-                    ) {
+                    if let Ok(bytes) =
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
+                    {
                         if let Ok(img) = image::load_from_memory(&bytes) {
                             let (wpx, hpx) = image::GenericImageView::dimensions(&img);
                             let mut png = std::io::Cursor::new(Vec::new());
@@ -701,26 +735,24 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                         .fonts(body.clone())
                         .size(24)
                         .line_spacing(body_spacing())
-                        .add_run(Run::new().add_text(format!(
-                            "[Image: {} (src: {})]",
-                            alt_text, src
-                        ))),
+                        .add_run(
+                            Run::new().add_text(format!("[Image: {} (src: {})]", alt_text, src)),
+                        ),
                 );
             }
             Block::PageBreak => {
-                docx = docx.add_paragraph(
-                    Paragraph::new().add_run(Run::new().add_break(BreakType::Page)),
-                );
+                docx = docx
+                    .add_paragraph(Paragraph::new().add_run(Run::new().add_break(BreakType::Page)));
             }
             Block::Blockquote { text, attribution } => {
-                let p = md_render::paragraph_from_markdown(&docx_markdown_with_visible_inline_math(
-                    text,
-                ))
-                    .fonts(body.clone())
-                    .size(24)
-                    .italic()
-                    .indent(Some(720), None, None, None)
-                    .line_spacing(body_spacing());
+                let p = md_render::paragraph_from_markdown(
+                    &docx_markdown_with_visible_inline_math(text),
+                )
+                .fonts(body.clone())
+                .size(24)
+                .italic()
+                .indent(Some(720), None, None, None)
+                .line_spacing(body_spacing());
                 docx = docx.add_paragraph(p);
                 if let Some(a) = attribution {
                     docx = docx.add_paragraph(
@@ -759,13 +791,12 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                             .color("auto"),
                     )
                     .add_paragraph(
-                        Paragraph::new()
-                            .add_run(Run::new().add_text(label).bold().size(22)),
+                        Paragraph::new().add_run(Run::new().add_text(label).bold().size(22)),
                     )
                     .add_paragraph(
-                        md_render::paragraph_from_markdown(&docx_markdown_with_visible_inline_math(
-                            text,
-                        ))
+                        md_render::paragraph_from_markdown(
+                            &docx_markdown_with_visible_inline_math(text),
+                        )
                         .size(22),
                     );
                 inner = inner.add_row(TableRow::new(vec![cell]));
@@ -809,10 +840,6 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
         .pack(Cursor::new(&mut buf))
         .map_err(|e| DocGenError::GenerationError(e.to_string()))?;
 
-    if !math_blocks.is_empty() {
-        buf = inject_math_into_docx(buf, &math_blocks)?;
-    }
-
     Ok(buf)
 }
 
@@ -821,138 +848,6 @@ fn stable_bookmark_id(name: &str) -> usize {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     name.hash(&mut h);
     (h.finish() % 1_000_000) as usize + 1
-}
-
-/// Post-process a DOCX ZIP: replace placeholder paragraphs with Word-native OMML
-/// (`m:oMath`). LaTeX is shown inside `m:t` (Office Math text) so Word renders a
-/// real equation object; raw W3C MathML inside `m:oMath` is not supported and is
-/// stripped, which previously produced empty equations.
-fn inject_math_into_docx(
-    docx_bytes: Vec<u8>,
-    math_blocks: &[(String, String, bool)],
-) -> Result<Vec<u8>, DocGenError> {
-    use std::io::{Read, Write};
-    use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
-
-    let cursor = Cursor::new(&docx_bytes);
-    let mut archive = ZipArchive::new(cursor)
-        .map_err(|e| DocGenError::GenerationError(format!("zip open: {e}")))?;
-
-    let count = archive.len();
-    let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(count);
-    for i in 0..count {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| DocGenError::GenerationError(format!("zip entry {i}: {e}")))?;
-        let name = file.name().to_string();
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)
-            .map_err(|e| DocGenError::GenerationError(format!("zip read {name}: {e}")))?;
-        entries.push((name, data));
-    }
-
-    for (name, data) in entries.iter_mut() {
-        if name == "word/document.xml" {
-            let xml = String::from_utf8(std::mem::take(data))
-                .map_err(|e| DocGenError::GenerationError(format!("xml utf8: {e}")))?;
-            *data = apply_math_replacements(xml, math_blocks).into_bytes();
-            break;
-        }
-    }
-
-    let mut out: Vec<u8> = Vec::new();
-    {
-        let cursor = Cursor::new(&mut out);
-        let mut writer = ZipWriter::new(cursor);
-        let opts = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        for (name, data) in &entries {
-            writer
-                .start_file(name, opts)
-                .map_err(|e| DocGenError::GenerationError(format!("zip write {name}: {e}")))?;
-            writer
-                .write_all(data)
-                .map_err(|e| DocGenError::GenerationError(format!("zip data {name}: {e}")))?;
-        }
-        writer
-            .finish()
-            .map_err(|e| DocGenError::GenerationError(format!("zip finish: {e}")))?;
-    }
-    Ok(out)
-}
-
-fn apply_math_replacements(mut xml: String, math_blocks: &[(String, String, bool)]) -> String {
-    for (placeholder, latex, display) in math_blocks {
-        xml = replace_math_placeholder(xml, placeholder, latex, *display);
-    }
-    xml
-}
-
-fn replace_math_placeholder(xml: String, placeholder: &str, latex: &str, display: bool) -> String {
-    // docx-rs may emit with or without xml:space="preserve"
-    let candidates = [
-        format!("<w:t>{placeholder}</w:t>"),
-        format!(r#"<w:t xml:space="preserve">{placeholder}</w:t>"#),
-    ];
-    let text_pos = match candidates.iter().find_map(|s| xml.find(s.as_str())) {
-        Some(p) => p,
-        None => return xml,
-    };
-
-    // Walk backwards to find the enclosing <w:p> (not <w:pPr>, <w:pStyle>, etc.)
-    let para_start = match find_enclosing_para_start(&xml, text_pos) {
-        Some(p) => p,
-        None => return xml,
-    };
-
-    let end_offset = match xml[text_pos..].find("</w:p>") {
-        Some(o) => o,
-        None => return xml,
-    };
-    let para_end = text_pos + end_offset + "</w:p>".len();
-
-    let math_xml = build_math_para_xml(latex, display);
-    format!("{}{}{}", &xml[..para_start], math_xml, &xml[para_end..])
-}
-
-/// Find the last `<w:p>` or `<w:p ...>` start before `pos`, skipping `<w:pPr>` etc.
-fn find_enclosing_para_start(xml: &str, pos: usize) -> Option<usize> {
-    let prefix = &xml[..pos];
-    let mut search_end = prefix.len();
-    loop {
-        let found = prefix[..search_end].rfind("<w:p")?;
-        let next = xml.as_bytes().get(found + 4).copied();
-        if matches!(next, Some(b'>') | Some(b' ') | Some(b'\n') | Some(b'\t') | Some(b'\r')) {
-            return Some(found);
-        }
-        if found == 0 {
-            return None;
-        }
-        search_end = found;
-    }
-}
-
-fn build_math_para_xml(latex: &str, display: bool) -> String {
-    let escaped = xml_escape(latex);
-    const M_NS: &str =
-        r#"xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math""#;
-    let inner = format!(
-        r#"<m:oMath {M_NS}><m:r><m:t xml:space="preserve">{escaped}</m:t></m:r></m:oMath>"#
-    );
-    if display {
-        format!(
-            r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><m:oMathPara {M_NS}>{inner}</m:oMathPara></w:p>"#
-        )
-    } else {
-        format!(r#"<w:p>{inner}</w:p>"#)
-    }
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -964,6 +859,14 @@ mod docx_inline_math_tests {
         let s = docx_markdown_with_visible_inline_math("Einstein $E = mc^2$ ties.");
         assert!(s.contains("`E = mc^2`"), "got: {s}");
         assert!(!s.contains("$E = mc^2$"), "got: {s}");
+    }
+
+    #[test]
+    fn latex_commands_inside_dollar_pair_are_not_character_escaped() {
+        let s = docx_markdown_with_visible_inline_math(r"Formula $\frac{1}{2} + \sqrt{x}$.");
+        assert!(s.contains(r"`\frac{1}{2} + \sqrt{x}`"), "got: {s}");
+        assert!(!s.contains(r"\ffrac"), "got: {s}");
+        assert!(!s.contains(r"\ssqrt"), "got: {s}");
     }
 
     #[test]

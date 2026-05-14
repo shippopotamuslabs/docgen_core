@@ -1,4 +1,4 @@
-use schemars::{JsonSchema, schema_for};
+use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
@@ -7,6 +7,7 @@ uniffi::setup_scaffolding!();
 mod docx_impl;
 mod highlight;
 mod latex_to_typst;
+mod math_png;
 mod md_render;
 mod typst_gen;
 mod typst_world;
@@ -282,6 +283,12 @@ mod tests {
     use super::*;
     use std::io::Read;
 
+    struct DocxParts {
+        document_xml: String,
+        rels_xml: String,
+        media: Vec<(String, Vec<u8>)>,
+    }
+
     fn get_sample_json() -> String {
         r#"{
             "version": "1.0",
@@ -295,6 +302,77 @@ mod tests {
                 { "type": "page_break" }
             ]
         }"#.to_string()
+    }
+
+    fn math_docx_json(display: bool, latex_json_value: &str) -> String {
+        format!(
+            r#"{{
+                "version": "1.0",
+                "metadata": {{ "title": "T", "author": null }},
+                "blocks": [
+                    {{ "type": "math", "display": {display}, "latex": "{latex_json_value}" }}
+                ]
+            }}"#,
+        )
+    }
+
+    fn inspect_docx(bytes: Vec<u8>) -> DocxParts {
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
+        let mut document_xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document.xml")
+            .read_to_string(&mut document_xml)
+            .expect("read document.xml");
+
+        let mut rels_xml = String::new();
+        archive
+            .by_name("word/_rels/document.xml.rels")
+            .expect("document.xml.rels")
+            .read_to_string(&mut rels_xml)
+            .expect("read document.xml.rels");
+
+        let mut media = Vec::new();
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).expect("zip entry");
+            let name = file.name().to_string();
+            if name.starts_with("word/media/image") && name.ends_with(".png") {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).expect("read media");
+                media.push((name, bytes));
+            }
+        }
+
+        DocxParts {
+            document_xml,
+            rels_xml,
+            media,
+        }
+    }
+
+    fn docx_text_from_w_t(document_xml: &str) -> String {
+        let mut text = String::new();
+        let mut rest = document_xml;
+        while let Some(start) = rest.find("<w:t") {
+            rest = &rest[start..];
+            let Some(close) = rest.find('>') else {
+                break;
+            };
+            rest = &rest[close + 1..];
+            let Some(end) = rest.find("</w:t>") else {
+                break;
+            };
+            text.push_str(&rest[..end]);
+            rest = &rest[end + "</w:t>".len()..];
+        }
+        text
+    }
+
+    fn first_media_dimensions(parts: &DocxParts) -> (u32, u32) {
+        let (_, bytes) = parts.media.first().expect("png media");
+        let image = image::load_from_memory(bytes).expect("decode png");
+        image::GenericImageView::dimensions(&image)
     }
 
     #[test]
@@ -504,37 +582,111 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_docx_math_block_embeds_word_native_omath_text() {
-        let json = r#"{
-            "version": "1.0",
-            "metadata": { "title": "T", "author": null },
-            "blocks": [
-                { "type": "math", "display": true, "latex": "E = mc^2" }
-            ]
-        }"#
-        .to_string();
-        let bytes = generate_docx(json).expect("docx");
-        let cursor = Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor).expect("zip");
-        let mut xml = String::new();
-        archive
-            .by_name("word/document.xml")
-            .expect("document.xml")
-            .read_to_string(&mut xml)
-            .expect("read xml");
-        assert!(
-            xml.contains("<m:t") && xml.contains("E = mc^2"),
-            "expected OMML m:t with LaTeX source; fragment: {}",
-            &xml[xml.find("<m:oMath").unwrap_or(0)..(xml.find("<m:oMath").unwrap_or(0) + 500).min(xml.len())]
+    fn test_generate_docx_display_math_embeds_png_caption_and_centering() {
+        let bytes = generate_docx(math_docx_json(true, "E = mc^2")).expect("docx");
+        let parts = inspect_docx(bytes);
+
+        assert!(!parts.document_xml.contains("MATHBLOCK_0"));
+        assert!(!parts.document_xml.contains("<m:oMath"));
+        assert_eq!(parts.media.len(), 1, "expected one PNG media entry");
+        assert!(parts.document_xml.contains("LaTeX source: E = mc^2"));
+        assert!(parts.document_xml.contains(r#"w:jc w:val="center""#));
+    }
+
+    #[test]
+    fn test_generate_docx_inline_math_embeds_png_and_caption() {
+        let bytes = generate_docx(math_docx_json(false, "x^2")).expect("docx");
+        let parts = inspect_docx(bytes);
+
+        assert_eq!(parts.media.len(), 1, "expected one PNG media entry");
+        assert!(parts.document_xml.contains("LaTeX source: x^2"));
+    }
+
+    #[test]
+    fn test_generate_docx_math_has_no_legacy_placeholder_or_omml() {
+        let bytes = generate_docx(math_docx_json(true, "E = mc^2")).expect("docx");
+        let parts = inspect_docx(bytes);
+
+        assert!(!parts.document_xml.contains("MATHBLOCK_"));
+        assert!(!parts.document_xml.contains("<m:oMath"));
+    }
+
+    #[test]
+    fn test_generate_docx_math_caption_preserves_two_consecutive_backslashes() {
+        let bytes = generate_docx(math_docx_json(true, r#"a\\\\b"#)).expect("docx");
+        let parts = inspect_docx(bytes);
+        let text = docx_text_from_w_t(&parts.document_xml);
+
+        assert!(text.contains(r"LaTeX source: a\\b"), "text was: {text}");
+    }
+
+    #[test]
+    fn test_generate_docx_math_image_relationship_references_existing_png() {
+        let bytes = generate_docx(math_docx_json(true, "E = mc^2")).expect("docx");
+        let parts = inspect_docx(bytes);
+        let embed_pos = parts
+            .document_xml
+            .find("r:embed=\"")
+            .expect("image embed relationship");
+        let id_start = embed_pos + "r:embed=\"".len();
+        let id_end = parts.document_xml[id_start..].find('"').expect("rId end") + id_start;
+        let rid = &parts.document_xml[id_start..id_end];
+
+        assert!(parts.rels_xml.contains(&format!(r#"Id="{rid}""#)));
+        assert!(parts.rels_xml.contains("/image"));
+        assert!(parts.rels_xml.contains("media/image"));
+        assert_eq!(parts.media.len(), 1, "expected one PNG media entry");
+    }
+
+    #[test]
+    fn test_generate_docx_invalid_math_keeps_caption_and_failure_marker() {
+        let bytes = generate_docx(math_docx_json(
+            true,
+            crate::math_png::INVALID_MATH_LATEX_FOR_DOCX
+                .replace('\\', r"\\")
+                .as_str(),
+        ))
+        .expect("docx");
+        let parts = inspect_docx(bytes);
+
+        assert!(parts.document_xml.contains("[Equation render failed]"));
+        assert!(parts.document_xml.contains(&format!(
+            "LaTeX source: {}",
+            crate::math_png::INVALID_MATH_LATEX_FOR_DOCX
+        )));
+    }
+
+    #[test]
+    fn test_generate_docx_empty_math_keeps_caption_and_failure_marker() {
+        let bytes = generate_docx(math_docx_json(true, "")).expect("docx");
+        let parts = inspect_docx(bytes);
+
+        assert!(parts.document_xml.contains("[Equation render failed]"));
+        assert!(parts.document_xml.contains("LaTeX source: "));
+    }
+
+    #[test]
+    fn test_generate_docx_fraction_math_png_has_real_render_dimensions() {
+        let bytes = generate_docx(math_docx_json(true, r#"\\frac{1}{2}"#)).expect("docx");
+        let parts = inspect_docx(bytes);
+        let (width, height) = first_media_dimensions(&parts);
+
+        assert!(width >= 40, "width was {width}");
+        assert!(height >= 20, "height was {height}");
+    }
+
+    #[test]
+    fn test_generate_docx_same_math_has_stable_png_dimensions() {
+        let first = inspect_docx(
+            generate_docx(math_docx_json(true, r#"\\frac{1}{2}"#)).expect("first docx"),
         );
-        assert!(
-            !xml.contains("<m:oMath/>"),
-            "unexpected empty self-closing m:oMath; fragment: {}",
-            &xml[xml.find("<m:oMath").unwrap_or(0)..(xml.find("<m:oMath").unwrap_or(0) + 400).min(xml.len())]
+        let second = inspect_docx(
+            generate_docx(math_docx_json(true, r#"\\frac{1}{2}"#)).expect("second docx"),
         );
-        assert!(
-            !xml.contains("http://www.w3.org/1998/Math/MathML"),
-            "W3C MathML inside m:oMath is not Word-compatible and must not be emitted"
+
+        assert_eq!(
+            first_media_dimensions(&first),
+            first_media_dimensions(&second)
         );
     }
 
@@ -560,7 +712,8 @@ mod tests {
         assert!(
             !xml.contains("$E = mc^2$"),
             "dollar-delimited math should not appear literally; xml snippet: {}",
-            &xml[xml.find("Einstein").unwrap_or(0)..(xml.find("Einstein").unwrap_or(0) + 400).min(xml.len())]
+            &xml[xml.find("Einstein").unwrap_or(0)
+                ..(xml.find("Einstein").unwrap_or(0) + 400).min(xml.len())]
         );
         assert!(xml.contains("E = mc^2"));
     }
