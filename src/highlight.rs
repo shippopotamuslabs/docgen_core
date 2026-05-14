@@ -256,7 +256,7 @@ fn tokenize_json(text: &str) -> Vec<Span> {
     out
 }
 
-/// Light-background syntax colors (e.g. HTML preview); PDF/DOCX code blocks use [`rgb_for_kind_code_dark`].
+/// Light-background syntax colors.
 #[allow(dead_code)]
 pub fn rgb_for_kind(k: TokenKind) -> [f32; 3] {
     match k {
@@ -265,17 +265,6 @@ pub fn rgb_for_kind(k: TokenKind) -> [f32; 3] {
         TokenKind::String => [0.0, 0.45, 0.0],
         TokenKind::Comment => [0.45, 0.45, 0.45],
         TokenKind::Number => [0.55, 0.0, 0.0],
-    }
-}
-
-/// Syntax colors on dark code blocks (PDF / screen-like).
-pub fn rgb_for_kind_code_dark(k: TokenKind) -> [f32; 3] {
-    match k {
-        TokenKind::Default => [0.83, 0.83, 0.83],
-        TokenKind::Keyword => [0.77, 0.52, 0.75],
-        TokenKind::String => [0.81, 0.58, 0.47],
-        TokenKind::Comment => [0.42, 0.60, 0.33],
-        TokenKind::Number => [0.71, 0.81, 0.66],
     }
 }
 
