@@ -1,14 +1,14 @@
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
-use schemars::{schema_for, JsonSchema};
 use std::io::Cursor;
 
 uniffi::setup_scaffolding!();
 
-mod md_render;
-mod pdf_gen;
-mod pdf_metrics;
-mod highlight;
 mod docx_impl;
+mod highlight;
+mod md_render;
+mod typst_gen;
+mod typst_world;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum DocGenError {
@@ -76,7 +76,10 @@ pub enum Block {
         #[serde(default)]
         highlight_lines: Vec<u32>,
     },
-    Math { display: bool, latex: String },
+    Math {
+        display: bool,
+        latex: String,
+    },
     Image {
         src: String,
         #[serde(default)]
@@ -105,7 +108,10 @@ pub enum Block {
         title: Option<String>,
         text: String,
     },
-    Footnote { id: String, text: String },
+    Footnote {
+        id: String,
+        text: String,
+    },
     Toc {
         #[serde(default)]
         max_depth: Option<u32>,
@@ -171,17 +177,15 @@ pub fn get_append_blocks_schema() -> String {
 
 #[uniffi::export]
 pub fn validate_start_artifact_params(json: String) -> Result<(), DocGenError> {
-    serde_json::from_str::<StartArtifactParams>(&json).map_err(|e| {
-        DocGenError::ValidationError(format!("start_artifact arguments: {e}"))
-    })?;
+    serde_json::from_str::<StartArtifactParams>(&json)
+        .map_err(|e| DocGenError::ValidationError(format!("start_artifact arguments: {e}")))?;
     Ok(())
 }
 
 #[uniffi::export]
 pub fn validate_append_blocks_params(json: String) -> Result<(), DocGenError> {
-    serde_json::from_str::<AppendBlocksParams>(&json).map_err(|e| {
-        DocGenError::ValidationError(format!("append_blocks arguments: {e}"))
-    })?;
+    serde_json::from_str::<AppendBlocksParams>(&json)
+        .map_err(|e| DocGenError::ValidationError(format!("append_blocks arguments: {e}")))?;
     Ok(())
 }
 
@@ -194,65 +198,65 @@ pub fn get_schema() -> String {
 #[uniffi::export]
 pub fn validate_document(json: String) -> Result<(), DocGenError> {
     let schema_json = schema_for!(Document);
-    let schema_value = serde_json::to_value(&schema_json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
-    
-    let validator = jsonschema::validator_for(&schema_value).map_err(|e| DocGenError::ValidationError(e.to_string()))?;
-    
-    let instance: serde_json::Value = serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
-    
+    let schema_value = serde_json::to_value(&schema_json)
+        .map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+
+    let validator = jsonschema::validator_for(&schema_value)
+        .map_err(|e| DocGenError::ValidationError(e.to_string()))?;
+
+    let instance: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+
     let error_messages: Vec<String> = validator
         .iter_errors(&instance)
         .map(|e| e.to_string())
         .collect();
-        
+
     if !error_messages.is_empty() {
         return Err(DocGenError::ValidationError(error_messages.join(", ")));
     }
-    
+
     // Also try to deserialize to make sure it's fully valid
-    let _: Document = serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
-    
+    let _: Document =
+        serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+
     Ok(())
 }
 
 #[uniffi::export]
 pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
-    let doc: Document = serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+    let doc: Document =
+        serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
     docx_impl::build_docx_bytes(&doc)
 }
 
 #[uniffi::export]
 pub fn generate_pdf(json: String) -> Result<Vec<u8>, DocGenError> {
-    let doc: Document = serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
-    pdf_gen::generate_pdf_from_document(&doc)
+    let doc: Document =
+        serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+    let generated = typst_gen::json_to_typst(&doc);
+    typst_gen::compile_to_pdf(generated)
 }
 
 #[uniffi::export]
 pub fn extract_text(bytes: Vec<u8>, mime_type: String) -> Result<String, DocGenError> {
     match mime_type.as_str() {
-        "application/pdf" => {
-            let doc = lopdf::Document::load_mem(&bytes).map_err(|e| DocGenError::ExtractionError(e.to_string()))?;
-            let mut text = String::new();
-            for page in doc.get_pages() {
-                let page_text = doc.extract_text(&[page.0]).map_err(|e| DocGenError::ExtractionError(e.to_string()))?;
-                text.push_str(&page_text);
-                text.push('\n');
-            }
-            Ok(text)
-        }
+        "application/pdf" => pdf_extract::extract_text_from_mem(&bytes)
+            .map_err(|e| DocGenError::ExtractionError(e.to_string())),
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
             Ok("DOCX extraction not fully implemented".to_string())
         }
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
-            use calamine::{Reader, Xlsx, Data};
+            use calamine::{Data, Reader, Xlsx};
             let cursor = Cursor::new(bytes);
-            let mut excel: Xlsx<_> = calamine::open_workbook_from_rs(cursor).map_err(|e: calamine::XlsxError| DocGenError::ExtractionError(e.to_string()))?;
+            let mut excel: Xlsx<_> = calamine::open_workbook_from_rs(cursor)
+                .map_err(|e: calamine::XlsxError| DocGenError::ExtractionError(e.to_string()))?;
             let mut text = String::new();
             if let Some(Ok(range)) = excel.worksheet_range_at(0) {
                 for row in range.rows() {
                     for cell in row {
                         match cell {
-                            Data::Empty => {},
+                            Data::Empty => {}
                             Data::String(s) => text.push_str(&format!("{} ", s)),
                             Data::Float(f) => text.push_str(&format!("{} ", f)),
                             Data::Int(i) => text.push_str(&format!("{} ", i)),
@@ -353,7 +357,9 @@ mod tests {
     #[test]
     fn test_validate_start_artifact_params_ok() {
         assert!(validate_start_artifact_params(r#"{"title":"T"}"#.to_string()).is_ok());
-        assert!(validate_start_artifact_params(r#"{"title":"T","author":"A"}"#.to_string()).is_ok());
+        assert!(
+            validate_start_artifact_params(r#"{"title":"T","author":"A"}"#.to_string()).is_ok()
+        );
     }
 
     #[test]
@@ -388,7 +394,8 @@ mod tests {
             "blocks": [
                 { "type": "invalid_type", "text": "oops" }
             ]
-        }"#.to_string();
+        }"#
+        .to_string();
         let result = validate_document(invalid_json);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -405,7 +412,8 @@ mod tests {
             "blocks": [
                 { "type": "heading", "text": "missing level" }
             ]
-        }"#.to_string();
+        }"#
+        .to_string();
         let result = validate_document(invalid_json);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -457,7 +465,10 @@ mod tests {
             "expected bold run in document.xml: {}",
             &xml[..xml.len().min(2000)]
         );
-        assert!(!xml.contains("**"), "markdown markers should not appear as literal text");
+        assert!(
+            !xml.contains("**"),
+            "markdown markers should not appear as literal text"
+        );
     }
 
     #[test]
@@ -473,7 +484,11 @@ mod tests {
         let pdf = generate_pdf(json).expect("pdf");
         let text = extract_text(pdf, "application/pdf".to_string()).expect("extract");
         assert!(!text.contains("**"), "text was: {}", text);
-        assert!(text.contains("Hi") || text.contains("hi"), "text was: {}", text);
+        assert!(
+            text.contains("Hi") || text.contains("hi"),
+            "text was: {}",
+            text
+        );
     }
 
     #[test]
@@ -495,163 +510,325 @@ mod tests {
             "blocks": [
                 { "type": "heading", "level": 1, "text": "H1 Title" }
             ]
-        }"#.to_string();
+        }"#
+        .to_string();
         let bytes = generate_docx(json).expect("docx");
         let cursor = Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor).expect("zip");
         let mut f = archive.by_name("word/document.xml").expect("document.xml");
         let mut xml = String::new();
         f.read_to_string(&mut xml).expect("read xml");
-        
+
         // Check for Arial font in headings
-        assert!(xml.contains("w:ascii=\"Arial\""), "Heading should have Arial font");
+        assert!(
+            xml.contains("w:ascii=\"Arial\""),
+            "Heading should have Arial font"
+        );
         // Check for font size 34 (17pt * 2)
-        assert!(xml.contains("<w:sz w:val=\"34\""), "Heading 1 should have size 34");
+        assert!(
+            xml.contains("<w:sz w:val=\"34\""),
+            "Heading 1 should have size 34"
+        );
     }
 }
 
 #[cfg(test)]
-mod pdf_code_block_layout_tests {
+mod typst_pdf_tests {
     use super::*;
 
-    // Extract all PDF content-stream operations from page 1 as (operator, Vec<f32>) pairs.
-    // Both Integer and Real operands are converted to f32; non-numeric become 0.0.
-    fn extract_page1_ops(pdf: Vec<u8>) -> Vec<(String, Vec<f32>)> {
-        let doc = lopdf::Document::load_mem(&pdf).expect("load pdf");
-        let pages = doc.get_pages();
-        let page_id = *pages.get(&1).expect("page 1");
-        let content_data = doc.get_page_content(page_id).expect("content");
-        let content = lopdf::content::Content::decode(&content_data).expect("decode");
-        content.operations.iter().map(|op| {
-            let args: Vec<f32> = op.operands.iter().map(|o| {
-                o.as_float().ok()
-                    .or_else(|| o.as_i64().ok().map(|i| i as f32))
-                    .unwrap_or(0.0)
-            }).collect();
-            (op.operator.clone(), args)
-        }).collect()
+    // ── S1 — PDF header bytes ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_typst_pdf_starts_with_percent_pdf() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "Hello", "author": null },
+            "blocks": [
+                { "type": "paragraph", "text": "Hello world." }
+            ]
+        }"#
+        .to_string();
+
+        let bytes = generate_pdf(json).expect("generate_pdf failed");
+
+        assert!(!bytes.is_empty(), "PDF bytes must not be empty");
+        assert_eq!(
+            &bytes[0..4],
+            b"%PDF",
+            "PDF must start with %PDF, got: {:?}",
+            &bytes[..4.min(bytes.len())]
+        );
     }
 
-    // Returns (rect_bottom, rect_height, code_tm_y) triples by pairing each full-width
-    // code-background rect with the Tm that immediately follows it in the stream.
-    // Full-width means x ≈ MARGIN_L (48) and w > 400 (excludes the 3-pt accent strip).
-    fn code_rect_tm_pairs(ops: &[(String, Vec<f32>)]) -> Vec<(f32, f32, f32)> {
-        let mut pairs = vec![];
-        let mut pending: Option<(f32, f32)> = None; // (rect_bottom, rect_h)
-        for (op, args) in ops {
-            match op.as_str() {
-                "re" if args.len() == 4
-                    && (args[0] - 48.0).abs() < 2.0
-                    && args[2] > 400.0 =>
-                {
-                    pending = Some((args[1], args[3]));
-                }
-                "Tm" if args.len() == 6 => {
-                    if let Some((rb, rh)) = pending.take() {
-                        pairs.push((rb, rh, args[5]));
-                    }
-                }
-                _ => {}
+    // ── S2 — All Block types produce no error ─────────────────────────────────
+
+    #[test]
+    fn test_typst_pdf_all_block_types_no_error() {
+        let doc = Document {
+            version: "1.0".to_string(),
+            metadata: Metadata { title: "All Blocks".to_string(), author: Some("Tester".to_string()) },
+            blocks: vec![
+                Block::Heading { level: 1, text: "Title".to_string(), anchor: Some("top".to_string()) },
+                Block::Heading { level: 2, text: "Section".to_string(), anchor: None },
+                Block::Heading { level: 3, text: "Subsection".to_string(), anchor: None },
+                Block::Paragraph { text: "Plain text with **bold** and *italic*.".to_string(), align: None },
+                Block::Paragraph { text: "Centered.".to_string(), align: Some(Alignment::Center) },
+                Block::Code { language: Some("rust".to_string()), text: "fn main() {}".to_string(),
+                              show_line_numbers: false, caption: None, highlight_lines: vec![] },
+                Block::Code { language: None, text: "plain code".to_string(),
+                              show_line_numbers: true, caption: Some("Listing 1".to_string()),
+                              highlight_lines: vec![] },
+                Block::List { ordered: false, items: vec![
+                    ListItem { text: "Alpha".to_string(), checked: None, children: vec![
+                        ListItem { text: "Nested".to_string(), checked: None, children: vec![] }
+                    ]},
+                    ListItem { text: "Beta".to_string(), checked: Some(true), children: vec![] },
+                ], start: None },
+                Block::List { ordered: true, items: vec![
+                    ListItem { text: "One".to_string(), checked: None, children: vec![] },
+                    ListItem { text: "Two".to_string(), checked: None, children: vec![] },
+                ], start: Some(5) },
+                Block::Table {
+                    header: vec!["Col A".to_string(), "Col B".to_string()],
+                    rows: vec![vec!["R1A".to_string(), "R1B".to_string()]],
+                    alignments: Some(vec![Alignment::Left, Alignment::Right]),
+                    caption: Some("Sample table".to_string()),
+                },
+                Block::Math { display: true, latex: "E = mc^2".to_string() },
+                // 1x1 transparent PNG as base64
+                Block::Image {
+                    src: "tiny.png".to_string(),
+                    alt: Some("Tiny image".to_string()),
+                    data_base64: Some(
+                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string()
+                    ),
+                    mime: Some("image/png".to_string()),
+                    width_pt: Some(10.0),
+                    height_pt: Some(10.0),
+                    align: None,
+                },
+                Block::Blockquote { text: "To be or not to be.".to_string(),
+                                    attribution: Some("Shakespeare".to_string()) },
+                Block::HorizontalRule,
+                Block::Callout { kind: CalloutKind::Warning, title: Some("Heads up".to_string()),
+                                 text: "Be careful.".to_string() },
+                Block::Callout { kind: CalloutKind::Note, title: None,
+                                 text: "Just a note.".to_string() },
+                Block::Footnote { id: "fn1".to_string(), text: "Footnote text here.".to_string() },
+                Block::Toc { max_depth: Some(2) },
+                Block::PageBreak,
+                Block::Paragraph { text: "After page break.".to_string(), align: None },
+            ],
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        let bytes =
+            generate_pdf(json).expect("generate_pdf must not error for all-blocks document");
+        assert_eq!(&bytes[0..4], b"%PDF");
+    }
+
+    // ── S3 — Text extraction recovers heading ──────────────────────────────────
+
+    #[test]
+    fn test_typst_pdf_extract_text_contains_heading() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "Extraction Test", "author": null },
+            "blocks": [
+                { "type": "heading", "level": 1, "text": "Project Phoenix" },
+                { "type": "paragraph", "text": "Short body." }
+            ]
+        }"#
+        .to_string();
+
+        let pdf_bytes = generate_pdf(json).expect("pdf");
+        let text = extract_text(pdf_bytes, "application/pdf".to_string()).expect("extract");
+
+        assert!(
+            text.contains("Project Phoenix"),
+            "expected 'Project Phoenix' in extracted text, got: {}",
+            &text[..text.len().min(500)]
+        );
+    }
+
+    // ── S4 — No markdown asterisk literals in extracted text ──────────────────
+
+    #[test]
+    fn test_typst_pdf_no_markdown_asterisks_in_extracted_text() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "paragraph", "text": "Say **Hi** there." }
+            ]
+        }"#
+        .to_string();
+
+        let pdf_bytes = generate_pdf(json).expect("pdf");
+        let text = extract_text(pdf_bytes, "application/pdf".to_string()).expect("extract");
+
+        assert!(
+            !text.contains("**"),
+            "literal ** appeared in extracted text: {}",
+            text
+        );
+        assert!(
+            text.contains("Hi"),
+            "word 'Hi' missing from extracted text: {}",
+            &text[..text.len().min(500)]
+        );
+    }
+
+    // ── M1 — Automatic pagination ─────────────────────────────────────────────
+
+    #[test]
+    fn test_typst_pdf_multi_page_long_content() {
+        let mut blocks = Vec::new();
+        for i in 0..90 {
+            blocks.push(Block::Paragraph {
+                text: format!(
+                    "Paragraph {}. Lorem ipsum dolor sit amet, consectetur adipiscing elit, \
+                     sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+                    i
+                ),
+                align: None,
+            });
+        }
+        let doc = Document {
+            version: "1.0".to_string(),
+            metadata: Metadata {
+                title: "Pagination Test".to_string(),
+                author: None,
+            },
+            blocks,
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        let pdf_bytes = generate_pdf(json).expect("pdf");
+
+        let lopdf_doc = lopdf::Document::load_mem(&pdf_bytes).expect("lopdf");
+        let page_count = lopdf_doc.get_pages().len();
+        assert!(
+            page_count >= 2,
+            "expected >= 2 pages for 90 paragraphs, got {}",
+            page_count
+        );
+    }
+
+    // ── M2 — Explicit PageBreak ────────────────────────────────────────────────
+
+    #[test]
+    fn test_typst_pdf_explicit_page_break_produces_two_pages() {
+        let doc = Document {
+            version: "1.0".to_string(),
+            metadata: Metadata {
+                title: "Break Test".to_string(),
+                author: None,
+            },
+            blocks: vec![
+                Block::Paragraph {
+                    text: "Page one.".to_string(),
+                    align: None,
+                },
+                Block::PageBreak,
+                Block::Paragraph {
+                    text: "Page two.".to_string(),
+                    align: None,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        let pdf_bytes = generate_pdf(json).expect("pdf");
+        let lopdf_doc = lopdf::Document::load_mem(&pdf_bytes).expect("lopdf");
+        assert_eq!(lopdf_doc.get_pages().len(), 2);
+    }
+
+    // ── E1 — Invalid JSON returns SerializationError ──────────────────────────
+
+    #[test]
+    fn test_typst_pdf_invalid_json_returns_serialization_error() {
+        let result = generate_pdf("not valid json".to_string());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DocGenError::SerializationError(_) => {}
+            other => panic!("expected SerializationError, got {:?}", other),
+        }
+    }
+
+    // ── E2 — Empty blocks list generates valid PDF ────────────────────────────
+
+    #[test]
+    fn test_typst_pdf_empty_blocks_produces_valid_pdf() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "Empty", "author": null },
+            "blocks": []
+        }"#
+        .to_string();
+        let bytes = generate_pdf(json).expect("empty-blocks PDF must succeed");
+        assert_eq!(&bytes[0..4], b"%PDF");
+    }
+
+    // ── E3 — Deeply nested list compiles (stack-size sanity) ──────────────────
+
+    #[test]
+    fn test_typst_pdf_deeply_nested_list_no_stack_overflow() {
+        // Build a 40-level deep nested unordered list.
+        fn nest(depth: u32) -> ListItem {
+            ListItem {
+                text: format!("Level {}", depth),
+                checked: None,
+                children: if depth == 0 {
+                    vec![]
+                } else {
+                    vec![nest(depth - 1)]
+                },
             }
         }
-        pairs
+        let doc = Document {
+            version: "1.0".to_string(),
+            metadata: Metadata {
+                title: "Nested".to_string(),
+                author: None,
+            },
+            blocks: vec![Block::List {
+                ordered: false,
+                items: vec![nest(40)],
+                start: None,
+            }],
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        let bytes = generate_pdf(json).expect("deep nesting must not stack-overflow");
+        assert_eq!(&bytes[0..4], b"%PDF");
     }
 
-    #[test]
-    fn test_code_bg_rect_contains_text_baseline() {
-        // Each code line's dark background rect must contain its text baseline (Tm y).
-        // Rect top must also clear the Courier 9pt ascender above the baseline (~6.81 pt).
-        let json = r#"{
-            "version": "1.0",
-            "metadata": { "title": "T", "author": null },
-            "blocks": [
-                { "type": "code", "language": null,
-                  "text": "let x = 1;\nlet y = 2;\nlet z = 3;" }
-            ]
-        }"#.to_string();
-
-        let ops = extract_page1_ops(generate_pdf(json).expect("pdf"));
-        let pairs = code_rect_tm_pairs(&ops);
-
-        assert_eq!(pairs.len(), 3, "expected 3 (rect, Tm) pairs for 3 code lines, got {}", pairs.len());
-
-        for (i, &(rect_bottom, rect_h, tm_y)) in pairs.iter().enumerate() {
-            let rect_top = rect_bottom + rect_h;
-            assert!(
-                tm_y > rect_bottom,
-                "line {i}: text baseline {tm_y:.2} not above rect bottom {rect_bottom:.2}"
-            );
-            assert!(
-                tm_y < rect_top,
-                "line {i}: text baseline {tm_y:.2} not below rect top {rect_top:.2}"
-            );
-            // Rect top must clear Courier 9pt ascender (≈6.81 pt above baseline).
-            assert!(
-                rect_top >= tm_y + 6.5,
-                "line {i}: rect top {rect_top:.2} < baseline {tm_y:.2} + 6.5 — ascenders clipped"
-            );
-        }
-    }
+    // ── E4 — LaTeX-only math does not crash the pipeline ─────────────────────
 
     #[test]
-    fn test_code_bg_rect_extends_below_baseline_by_at_least_descender() {
-        // Rect bottom must be below the baseline by at least the Courier 9pt descender (≈2.2 pt).
-        let json = r#"{
-            "version": "1.0",
-            "metadata": { "title": "T", "author": null },
-            "blocks": [
-                { "type": "code", "language": null, "text": "fn main() {}" }
-            ]
-        }"#.to_string();
-
-        let ops = extract_page1_ops(generate_pdf(json).expect("pdf"));
-        let pairs = code_rect_tm_pairs(&ops);
-
-        assert!(!pairs.is_empty(), "no code rect/Tm pairs found");
-        for (i, &(rect_bottom, _, tm_y)) in pairs.iter().enumerate() {
-            assert!(
-                rect_bottom <= tm_y - 2.0,
-                "line {i}: rect bottom {rect_bottom:.2} not ≥ 2 pt below baseline {tm_y:.2}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_paragraph_after_code_block_ascenders_clear_rect_bottom() {
-        // Times-Roman 12pt ascender ≈ 8.196 pt (683/1000 × 12).
-        // The paragraph baseline must sit far enough below the last code rect's bottom
-        // that the paragraph's ascenders do not intrude into the dark background.
-        const TIMES_ROMAN_12_ASCENDER: f32 = 8.196;
-
-        let json = r#"{
-            "version": "1.0",
-            "metadata": { "title": "T", "author": null },
-            "blocks": [
-                { "type": "code", "language": null, "text": "fn foo() {}" },
-                { "type": "paragraph", "text": "Paragraph after code." }
-            ]
-        }"#.to_string();
-
-        let ops = extract_page1_ops(generate_pdf(json).expect("pdf"));
-        let pairs = code_rect_tm_pairs(&ops);
-
-        assert!(!pairs.is_empty(), "no code rect/Tm pairs");
-        let (last_rect_bottom, _, last_code_tm_y) = *pairs.last().unwrap();
-
-        // Find the first Tm y that is below last_code_tm_y by more than the code line
-        // height (≈12.15 pt) — that is the paragraph's baseline.
-        let para_tm_y = ops.iter()
-            .filter(|(op, args)| op == "Tm" && args.len() == 6)
-            .map(|(_, a)| a[5])
-            .find(|&y| y < last_code_tm_y - 10.0)
-            .expect("paragraph Tm not found");
-
-        let para_ascender_top = para_tm_y + TIMES_ROMAN_12_ASCENDER;
-        assert!(
-            para_ascender_top <= last_rect_bottom,
-            "paragraph ascender top ({para_ascender_top:.2}) overlaps code rect bottom \
-             ({last_rect_bottom:.2}) by {:.2} pt — increase vspace after code block",
-            para_ascender_top - last_rect_bottom
-        );
+    fn test_typst_pdf_latex_only_math_falls_back_cleanly() {
+        let doc = Document {
+            version: "1.0".to_string(),
+            metadata: Metadata {
+                title: "Math".to_string(),
+                author: None,
+            },
+            blocks: vec![
+                Block::Paragraph {
+                    text: "Before math.".to_string(),
+                    align: None,
+                },
+                Block::Math {
+                    display: true,
+                    latex: r"\sum_{i=0}^{n} i^2".to_string(),
+                },
+                Block::Paragraph {
+                    text: "After math.".to_string(),
+                    align: None,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        // Generator detects backslash-alpha → emits comment + raw fallback.
+        // Pipeline must succeed (no GenerationError).
+        let bytes = generate_pdf(json).expect("LaTeX fallback must produce valid PDF");
+        assert_eq!(&bytes[0..4], b"%PDF");
     }
 }
