@@ -509,3 +509,149 @@ mod tests {
         assert!(xml.contains("<w:sz w:val=\"34\""), "Heading 1 should have size 34");
     }
 }
+
+#[cfg(test)]
+mod pdf_code_block_layout_tests {
+    use super::*;
+
+    // Extract all PDF content-stream operations from page 1 as (operator, Vec<f32>) pairs.
+    // Both Integer and Real operands are converted to f32; non-numeric become 0.0.
+    fn extract_page1_ops(pdf: Vec<u8>) -> Vec<(String, Vec<f32>)> {
+        let doc = lopdf::Document::load_mem(&pdf).expect("load pdf");
+        let pages = doc.get_pages();
+        let page_id = *pages.get(&1).expect("page 1");
+        let content_data = doc.get_page_content(page_id).expect("content");
+        let content = lopdf::content::Content::decode(&content_data).expect("decode");
+        content.operations.iter().map(|op| {
+            let args: Vec<f32> = op.operands.iter().map(|o| {
+                o.as_float().ok()
+                    .or_else(|| o.as_i64().ok().map(|i| i as f32))
+                    .unwrap_or(0.0)
+            }).collect();
+            (op.operator.clone(), args)
+        }).collect()
+    }
+
+    // Returns (rect_bottom, rect_height, code_tm_y) triples by pairing each full-width
+    // code-background rect with the Tm that immediately follows it in the stream.
+    // Full-width means x ≈ MARGIN_L (48) and w > 400 (excludes the 3-pt accent strip).
+    fn code_rect_tm_pairs(ops: &[(String, Vec<f32>)]) -> Vec<(f32, f32, f32)> {
+        let mut pairs = vec![];
+        let mut pending: Option<(f32, f32)> = None; // (rect_bottom, rect_h)
+        for (op, args) in ops {
+            match op.as_str() {
+                "re" if args.len() == 4
+                    && (args[0] - 48.0).abs() < 2.0
+                    && args[2] > 400.0 =>
+                {
+                    pending = Some((args[1], args[3]));
+                }
+                "Tm" if args.len() == 6 => {
+                    if let Some((rb, rh)) = pending.take() {
+                        pairs.push((rb, rh, args[5]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        pairs
+    }
+
+    #[test]
+    fn test_code_bg_rect_contains_text_baseline() {
+        // Each code line's dark background rect must contain its text baseline (Tm y).
+        // Rect top must also clear the Courier 9pt ascender above the baseline (~6.81 pt).
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "code", "language": null,
+                  "text": "let x = 1;\nlet y = 2;\nlet z = 3;" }
+            ]
+        }"#.to_string();
+
+        let ops = extract_page1_ops(generate_pdf(json).expect("pdf"));
+        let pairs = code_rect_tm_pairs(&ops);
+
+        assert_eq!(pairs.len(), 3, "expected 3 (rect, Tm) pairs for 3 code lines, got {}", pairs.len());
+
+        for (i, &(rect_bottom, rect_h, tm_y)) in pairs.iter().enumerate() {
+            let rect_top = rect_bottom + rect_h;
+            assert!(
+                tm_y > rect_bottom,
+                "line {i}: text baseline {tm_y:.2} not above rect bottom {rect_bottom:.2}"
+            );
+            assert!(
+                tm_y < rect_top,
+                "line {i}: text baseline {tm_y:.2} not below rect top {rect_top:.2}"
+            );
+            // Rect top must clear Courier 9pt ascender (≈6.81 pt above baseline).
+            assert!(
+                rect_top >= tm_y + 6.5,
+                "line {i}: rect top {rect_top:.2} < baseline {tm_y:.2} + 6.5 — ascenders clipped"
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_bg_rect_extends_below_baseline_by_at_least_descender() {
+        // Rect bottom must be below the baseline by at least the Courier 9pt descender (≈2.2 pt).
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "code", "language": null, "text": "fn main() {}" }
+            ]
+        }"#.to_string();
+
+        let ops = extract_page1_ops(generate_pdf(json).expect("pdf"));
+        let pairs = code_rect_tm_pairs(&ops);
+
+        assert!(!pairs.is_empty(), "no code rect/Tm pairs found");
+        for (i, &(rect_bottom, _, tm_y)) in pairs.iter().enumerate() {
+            assert!(
+                rect_bottom <= tm_y - 2.0,
+                "line {i}: rect bottom {rect_bottom:.2} not ≥ 2 pt below baseline {tm_y:.2}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_paragraph_after_code_block_ascenders_clear_rect_bottom() {
+        // Times-Roman 12pt ascender ≈ 8.196 pt (683/1000 × 12).
+        // The paragraph baseline must sit far enough below the last code rect's bottom
+        // that the paragraph's ascenders do not intrude into the dark background.
+        const TIMES_ROMAN_12_ASCENDER: f32 = 8.196;
+
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "T", "author": null },
+            "blocks": [
+                { "type": "code", "language": null, "text": "fn foo() {}" },
+                { "type": "paragraph", "text": "Paragraph after code." }
+            ]
+        }"#.to_string();
+
+        let ops = extract_page1_ops(generate_pdf(json).expect("pdf"));
+        let pairs = code_rect_tm_pairs(&ops);
+
+        assert!(!pairs.is_empty(), "no code rect/Tm pairs");
+        let (last_rect_bottom, _, last_code_tm_y) = *pairs.last().unwrap();
+
+        // Find the first Tm y that is below last_code_tm_y by more than the code line
+        // height (≈12.15 pt) — that is the paragraph's baseline.
+        let para_tm_y = ops.iter()
+            .filter(|(op, args)| op == "Tm" && args.len() == 6)
+            .map(|(_, a)| a[5])
+            .find(|&y| y < last_code_tm_y - 10.0)
+            .expect("paragraph Tm not found");
+
+        let para_ascender_top = para_tm_y + TIMES_ROMAN_12_ASCENDER;
+        assert!(
+            para_ascender_top <= last_rect_bottom,
+            "paragraph ascender top ({para_ascender_top:.2}) overlaps code rect bottom \
+             ({last_rect_bottom:.2}) by {:.2} pt — increase vspace after code block",
+            para_ascender_top - last_rect_bottom
+        );
+    }
+}
