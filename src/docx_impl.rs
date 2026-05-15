@@ -668,7 +668,16 @@ pub fn build_docx_bytes(doc: &Document) -> Result<Vec<u8>, DocGenError> {
                         let mut pic = Pic::new_with_dimensions(png_bytes, wpx, hpx)
                             .id(format!("image{math_image_count}"));
                         math_image_count += 1;
-                        if !display {
+                        if *display {
+                            let display_scale = math_png::MATH_DISPLAY_PIXELS_PER_POINT /
+                                math_png::MATH_RENDER_PIXELS_PER_POINT;
+                            let target_width_px = (wpx as f32 * display_scale).round().max(1.0);
+                            let target_height_px = (hpx as f32 * display_scale).round().max(1.0);
+                            pic.size = (
+                                docx_rs::from_px(target_width_px as u32),
+                                docx_rs::from_px(target_height_px as u32),
+                            );
+                        } else {
                             // 24pt body line height at 96 DPI: 24 * 96 / 72 = 32px.
                             let target_height_px = 24.0_f32 * 96.0 / 72.0;
                             let aspect = wpx as f32 / hpx.max(1) as f32;

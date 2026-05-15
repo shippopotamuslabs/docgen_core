@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 
-const PIXELS_PER_POINT: f32 = 4.0;
+pub(crate) const MATH_RENDER_PIXELS_PER_POINT: f32 = 8.0;
+pub(crate) const MATH_DISPLAY_PIXELS_PER_POINT: f32 = 4.0;
 
 #[allow(dead_code)]
 pub(crate) const INVALID_MATH_LATEX_FOR_DOCX: &str = "\\frac{1}{";
@@ -60,7 +61,7 @@ fn render_math_latex_to_png_inner(
     let page = document.pages.first().ok_or_else(|| {
         crate::DocGenError::GenerationError("math PNG render produced no pages".to_string())
     })?;
-    let pixmap = typst_render::render(page, PIXELS_PER_POINT);
+    let pixmap = typst_render::render(page, MATH_RENDER_PIXELS_PER_POINT);
     pixmap
         .encode_png()
         .map_err(|e| crate::DocGenError::GenerationError(format!("PNG encode: {e}")))
