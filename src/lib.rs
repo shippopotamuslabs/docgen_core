@@ -752,6 +752,29 @@ mod tests {
 mod typst_pdf_tests {
     use super::*;
 
+    // ── S1b — Emoji in paragraph does not emit missing-glyph placeholder ────
+
+    #[test]
+    fn test_typst_pdf_emoji_renders_without_noglyph_placeholder() {
+        let json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "Emoji", "author": null },
+            "blocks": [
+                { "type": "paragraph", "text": "Hello 👋 world 🎉" }
+            ]
+        }"#
+        .to_string();
+
+        let bytes = generate_pdf(json).expect("generate_pdf with emoji failed");
+        assert_eq!(&bytes[0..4], b"%PDF");
+        assert!(
+            !bytes
+                .windows(7)
+                .any(|window| window.eq_ignore_ascii_case(b"NOGLYPH")),
+            "PDF still contains NOGLYPH missing-glyph placeholder"
+        );
+    }
+
     // ── S1 — PDF header bytes ─────────────────────────────────────────────────
 
     #[test]

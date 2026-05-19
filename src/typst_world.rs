@@ -14,6 +14,7 @@ static INTER_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-Italic.ttf");
 static INTER_BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-BoldItalic.ttf");
 static JETBRAINS_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 static JETBRAINS_BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
+static NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
 
 const FONT_DATA: &[&[u8]] = &[
     INTER_REGULAR,
@@ -22,6 +23,7 @@ const FONT_DATA: &[&[u8]] = &[
     INTER_BOLD_ITALIC,
     JETBRAINS_REGULAR,
     JETBRAINS_BOLD,
+    NOTO_COLOR_EMOJI,
 ];
 
 /// A minimal Typst world implementation for PocketCrew document generation.

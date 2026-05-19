@@ -11,7 +11,7 @@ pub struct GeneratedSource {
 }
 
 const PREAMBLE: &str = r####"#set page(margin: (x: 48pt, y: 56pt), numbering: "1")
-#set text(font: "Inter", size: 12pt, fill: black)
+#set text(font: ("Inter", "Noto Color Emoji"), size: 12pt, fill: black)
 #show raw: set text(font: "JetBrains Mono", size: 9pt)
 #show raw.where(block: true): block.with(
   fill: rgb("#1E2229"),
@@ -891,12 +891,12 @@ mod tests {
         assert!(out.contains("$ E = m c^2 $"), "got: {}", trim(&out));
     }
 
-    // ── G21 — Preamble sets Inter font ───────────────────────────────────────
+    // ── G21 — Preamble sets Inter + Noto Color Emoji font stack ──────────────
 
     #[test]
-    fn preamble_contains_inter_font_set_rule() {
+    fn preamble_contains_inter_and_emoji_font_set_rule() {
         let out = json_to_typst(&doc_with_blocks(vec![])).source;
-        assert!(out.contains("#set text(font: \"Inter\""));
+        assert!(out.contains("#set text(font: (\"Inter\", \"Noto Color Emoji\")"));
     }
 
     // ── G22 — Preamble sets JetBrains Mono for raw ───────────────────────────
