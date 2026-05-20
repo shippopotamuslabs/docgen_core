@@ -1,0 +1,6 @@
+# Android arm64 must use 16 KB ELF segment alignment (see scripts/build-docgen-bindings.sh).
+[target.aarch64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
