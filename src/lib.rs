@@ -6,9 +6,12 @@ uniffi::setup_scaffolding!();
 
 mod docx_impl;
 mod highlight;
+mod json_repair;
 mod latex_to_typst;
 mod math_png;
 mod md_render;
+mod payload_heal;
+mod serde_coerce;
 mod typst_gen;
 mod typst_world;
 
@@ -43,6 +46,7 @@ pub struct Metadata {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
     Heading {
+        #[serde(deserialize_with = "serde_coerce::deserialize_u32_lenient")]
         level: u32,
         text: String,
         #[serde(default)]
@@ -54,9 +58,10 @@ pub enum Block {
         align: Option<Alignment>,
     },
     List {
+        #[serde(deserialize_with = "serde_coerce::deserialize_bool_lenient")]
         ordered: bool,
         items: Vec<ListItem>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "serde_coerce::deserialize_option_u32_lenient")]
         start: Option<u32>,
     },
     Table {
@@ -71,14 +76,15 @@ pub enum Block {
         #[serde(default)]
         language: Option<String>,
         text: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "serde_coerce::deserialize_bool_lenient")]
         show_line_numbers: bool,
         #[serde(default)]
         caption: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "serde_coerce::deserialize_vec_u32_lenient")]
         highlight_lines: Vec<u32>,
     },
     Math {
+        #[serde(deserialize_with = "serde_coerce::deserialize_bool_lenient")]
         display: bool,
         latex: String,
     },
@@ -90,9 +96,9 @@ pub enum Block {
         data_base64: Option<String>,
         #[serde(default)]
         mime: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "serde_coerce::deserialize_option_f32_lenient")]
         width_pt: Option<f32>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "serde_coerce::deserialize_option_f32_lenient")]
         height_pt: Option<f32>,
         #[serde(default)]
         align: Option<Alignment>,
@@ -115,7 +121,7 @@ pub enum Block {
         text: String,
     },
     Toc {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "serde_coerce::deserialize_option_u32_lenient")]
         max_depth: Option<u32>,
     },
 }
@@ -123,7 +129,7 @@ pub enum Block {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 pub struct ListItem {
     pub text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "serde_coerce::deserialize_option_bool_lenient")]
     pub checked: Option<bool>,
     #[serde(default)]
     pub children: Vec<ListItem>,
@@ -179,14 +185,18 @@ pub fn get_append_blocks_schema() -> String {
 
 #[uniffi::export]
 pub fn validate_start_artifact_params(json: String) -> Result<(), DocGenError> {
-    serde_json::from_str::<StartArtifactParams>(&json)
+    let (value, _) = payload_heal::heal_start_artifact_input(&json)
+        .map_err(|error| DocGenError::ValidationError(format!("start_artifact arguments: {error}")))?;
+    serde_json::from_value::<StartArtifactParams>(value)
         .map_err(|e| DocGenError::ValidationError(format!("start_artifact arguments: {e}")))?;
     Ok(())
 }
 
 #[uniffi::export]
 pub fn validate_append_blocks_params(json: String) -> Result<(), DocGenError> {
-    serde_json::from_str::<AppendBlocksParams>(&json)
+    let (value, _) = payload_heal::heal_append_blocks_input(&json)
+        .map_err(|error| DocGenError::ValidationError(format!("append_blocks arguments: {error}")))?;
+    serde_json::from_value::<AppendBlocksParams>(value)
         .map_err(|e| DocGenError::ValidationError(format!("append_blocks arguments: {e}")))?;
     Ok(())
 }
@@ -206,8 +216,8 @@ pub fn validate_document(json: String) -> Result<(), DocGenError> {
     let validator = jsonschema::validator_for(&schema_value)
         .map_err(|e| DocGenError::ValidationError(e.to_string()))?;
 
-    let instance: serde_json::Value =
-        serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+    let (instance, _) = payload_heal::heal_document_input(&json)
+        .map_err(|error| DocGenError::SerializationError(error))?;
 
     let error_messages: Vec<String> = validator
         .iter_errors(&instance)
@@ -219,23 +229,27 @@ pub fn validate_document(json: String) -> Result<(), DocGenError> {
     }
 
     // Also try to deserialize to make sure it's fully valid
-    let _: Document =
-        serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+    let _: Document = serde_json::from_value(instance)
+        .map_err(|e| DocGenError::SerializationError(e.to_string()))?;
 
     Ok(())
 }
 
 #[uniffi::export]
 pub fn generate_docx(json: String) -> Result<Vec<u8>, DocGenError> {
+    let (value, _) = payload_heal::heal_document_input(&json)
+        .map_err(|error| DocGenError::SerializationError(error))?;
     let doc: Document =
-        serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+        serde_json::from_value(value).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
     docx_impl::build_docx_bytes(&doc)
 }
 
 #[uniffi::export]
 pub fn generate_pdf(json: String) -> Result<Vec<u8>, DocGenError> {
+    let (value, _) = payload_heal::heal_document_input(&json)
+        .map_err(|error| DocGenError::SerializationError(error))?;
     let doc: Document =
-        serde_json::from_str(&json).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
+        serde_json::from_value(value).map_err(|e| DocGenError::SerializationError(e.to_string()))?;
     let generated = typst_gen::json_to_typst(&doc);
     typst_gen::compile_to_pdf(generated)
 }
@@ -442,15 +456,45 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_start_artifact_params_rejects_document_shape() {
-        let bad = r#"{"version":"1.0","metadata":{"title":"x"},"blocks":[]}"#.to_string();
-        assert!(validate_start_artifact_params(bad).is_err());
+    fn test_validate_start_artifact_params_heals_document_shape() {
+        let healed = r#"{"version":"1.0","metadata":{"title":"x"},"blocks":[]}"#.to_string();
+        assert!(validate_start_artifact_params(healed).is_ok());
     }
 
     #[test]
     fn test_validate_append_blocks_params_ok() {
         let ok = r#"{"artifactId":"id-1","blocks":[{"type":"paragraph","text":"hi"}],"isComplete":false}"#.to_string();
         assert!(validate_append_blocks_params(ok).is_ok());
+    }
+
+    #[test]
+    fn test_validate_append_blocks_params_accepts_stringified_heading_level() {
+        let ok = r#"{"artifactId":"id-1","blocks":[{"type":"heading","level":"1","text":"Title"}],"isComplete":false}"#.to_string();
+        assert!(validate_append_blocks_params(ok).is_ok());
+    }
+
+    #[test]
+    fn test_validate_append_blocks_params_heals_stringified_blocks() {
+        let ok = r#"{"artifactId":"id-1","blocks":"[{\"type\":\"paragraph\",\"text\":\"Hi\"}]","isComplete":false}"#.to_string();
+        assert!(validate_append_blocks_params(ok).is_ok());
+    }
+
+    #[test]
+    fn test_validate_append_blocks_params_heals_snake_case_aliases() {
+        let ok = r#"{"artifact_id":"id-1","blocks":[],"is_complete":"false"}"#.to_string();
+        assert!(validate_append_blocks_params(ok).is_ok());
+    }
+
+    #[test]
+    fn test_validate_document_accepts_stringified_heading_level() {
+        let valid_json = r#"{
+            "version": "1.0",
+            "metadata": { "title": "Test Doc" },
+            "blocks": [
+                { "type": "heading", "level": "2", "text": "Section" }
+            ]
+        }"#;
+        assert!(validate_document(valid_json.to_string()).is_ok());
     }
 
     #[test]
@@ -1071,3 +1115,5 @@ mod typst_pdf_tests {
         assert_eq!(&bytes[0..4], b"%PDF");
     }
 }
+
+
