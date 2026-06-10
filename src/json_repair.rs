@@ -49,28 +49,6 @@ pub fn repair_json(input: &str) -> Result<Value, JsonRepairError> {
     parser.parse_value()
 }
 
-/// In-place repair of string values that themselves contain JSON-like data.
-pub fn repair_json_value_inplace(value: &mut Value) {
-    match value {
-        Value::String(s) => {
-            if let Ok(repaired) = repair_json(s) {
-                *value = repaired;
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                repair_json_value_inplace(item);
-            }
-        }
-        Value::Object(map) => {
-            for item in map.values_mut() {
-                repair_json_value_inplace(item);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn strip_markdown_fences(input: &str) -> String {
     let trimmed = input.trim();
     if !trimmed.starts_with("```") {
