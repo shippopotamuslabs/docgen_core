@@ -48,12 +48,10 @@ around it, plus cargo-ndk and the Android NDK on the machine.
 
 ## Layout
 
-- `src/lib.rs`: the exported UniFFI surface and the document model
-- `src/docx_impl.rs`, `src/typst_gen.rs`, `src/typst_world.rs`: the DOCX and
-  Typst/PDF renderers
-- `src/md_render.rs`, `src/highlight.rs`, `src/latex_to_typst.rs`,
-  `src/math_png.rs`: Markdown, code highlighting, and math handling
-- `src/json_repair.rs`, `src/payload_heal.rs`, `src/serde_coerce.rs`:
-  payload cleanup ahead of validation
-- `plans/`: the spec and test spec for the Typst PDF feature
-  (`FEAT-typst-pdf`)
+| Path | Contents |
+| --- | --- |
+| `src/lib.rs` | The exported UniFFI surface and the document model |
+| `src/docx_impl.rs`, `src/typst_gen.rs`, `src/typst_world.rs` | The DOCX and Typst/PDF renderers |
+| `src/md_render.rs`, `src/highlight.rs`, `src/latex_to_typst.rs`, `src/math_png.rs` | Markdown, code highlighting, and math handling |
+| `src/json_repair.rs`, `src/payload_heal.rs`, `src/serde_coerce.rs` | Payload cleanup ahead of validation |
+| `plans/` | The spec and test spec for the Typst PDF feature (`FEAT-typst-pdf`) |
