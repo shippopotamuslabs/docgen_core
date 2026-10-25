@@ -55,3 +55,7 @@ around it, plus cargo-ndk and the Android NDK on the machine.
 | `src/md_render.rs`, `src/highlight.rs`, `src/latex_to_typst.rs`, `src/math_png.rs` | Markdown, code highlighting, and math handling |
 | `src/json_repair.rs`, `src/payload_heal.rs`, `src/serde_coerce.rs` | Payload cleanup ahead of validation |
 | `plans/` | The spec and test spec for the Typst PDF feature (`FEAT-typst-pdf`) |
+
+## License
+
+0BSD license. Do whatever you want with the code. Just don't expect it to work or sue me.
